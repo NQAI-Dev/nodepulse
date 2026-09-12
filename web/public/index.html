@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NodePulse Fleet Control</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --surface: #161b22;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-bright: #f0f6fc;
+            --accent: #58a6ff;
+            --green: #2ea043;
+            --red: #f85149;
+            --orange: #d29922;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; }
+        body { background: var(--bg); color: var(--text); padding: 2rem; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+        h1 { color: var(--text-bright); font-size: 1.5rem; display: flex; align-items: center; gap: 0.5rem; }
+        .badge { background: var(--surface); border: 1px solid var(--border); padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.8rem; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1.5rem; }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; transition: transform 0.1s; }
+        .card:hover { transform: translateY(-2px); }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+        .node-id { font-weight: bold; color: var(--text-bright); font-size: 1.1rem; }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+        .status-online { background: var(--green); box-shadow: 0 0 8px var(--green); }
+        .status-warning { background: var(--orange); box-shadow: 0 0 8px var(--orange); }
+        .status-offline { background: var(--red); }
+        .metric-row { display: flex; justify-content: space-between; margin-bottom: 0.5rem; font-size: 0.9rem; }
+        .progress-bar { background: var(--border); height: 6px; border-radius: 3px; overflow: hidden; margin-top: 0.25rem; margin-bottom: 0.75rem; }
+        .progress-fill { height: 100%; background: var(--accent); }
+        .footer { margin-top: 2rem; font-size: 0.8rem; color: #8b949e; text-align: center; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>⚡ NodePulse <span>Fleet</span></h1>
+        <div>
+            <span class="badge" id="node-count">Nodes: 0</span>
+            <span class="badge" id="refresh-time">Updated: Just now</span>
+        </div>
+    </header>
+
+    <div class="grid" id="fleet-grid">
+        <!-- Dynamically filled -->
+    </div>
+
+    <div class="footer">
+        NodePulse Ingestion Engine • Distributed Edge Control
+    </div>
+
+    <script>
+        async function fetchFleet() {
+            try {
+                const res = await fetch('/api/v1/nodes');
+                const data = await res.json();
+                render(data);
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function render(nodes) {
+            const grid = document.getElementById('fleet-grid');
+            const count = Object.keys(nodes).length;
+            document.getElementById('node-count').innerText = `Nodes: ${count}`;
+            document.getElementById('refresh-time').innerText = `Updated: ${new Date().toLocaleTimeString()}`;
+
+            grid.innerHTML = '';
+            for (const [id, node] of Object.entries(nodes)) {
+                const latest = node.latest || {};
+                const mem = latest.memory || {};
+                const cpu = latest.cpu || {};
+                const disk = (latest.disks && latest.disks[0]) || {};
+
+                const card = document.createElement('div');
+                card.className = 'card';
+                card.innerHTML = `
+                    <div class="card-header">
+                        <span class="node-id">${id}</span>
+                        <span class="status-dot status-${node.status}"></span>
+                    </div>
+                    <div style="font-size: 0.8rem; color: #8b949e; margin-bottom: 1rem;">
+                        ${node.info.os}/${node.info.arch} • Load: ${cpu.load_1.toFixed(2)} / ${cpu.load_5.toFixed(2)}
+                    </div>
+                    <div>
+                        <div class="metric-row">
+                            <span>Memory (${(mem.used_pct || 0).toFixed(1)}%)</span>
+                            <span>${((mem.used_bytes || 0)/(1024**3)).toFixed(1)} / ${((mem.total_bytes || 0)/(1024**3)).toFixed(1)} GB</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: ${mem.used_pct || 0}%"></div>
+                        </div>
+                        <div class="metric-row">
+                            <span>Disk (${(disk.used_pct || 0).toFixed(1)}%)</span>
+                            <span>${((disk.total_bytes - disk.free_bytes || 0)/(1024**3)).toFixed(1)} / ${((disk.total_bytes || 0)/(1024**3)).toFixed(1)} GB</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: ${disk.used_pct || 0}%"></div>
+                        </div>
+                    </div>
+                `;
+                grid.appendChild(card);
+            }
+        }
+
+        fetchFleet();
+        setInterval(fetchFleet, 5000);
+    </script>
+</body>
+</html>
