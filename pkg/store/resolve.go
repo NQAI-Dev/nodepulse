@@ -53,24 +53,32 @@ func (p *PersistentStore) ResolveStaleIncidents(hb *protocol.Heartbeat) {
 
 	now := time.Now()
 	for _, inc := range open {
-		if incidentStillActive(inc.title, hb, now, inc.startedAt) {
+		reason := incidentResolutionReason(inc.title, hb, now, inc.startedAt)
+		if reason == "" {
 			continue
 		}
-		p.markResolvedAndNotify(inc.id, hb.NodeID, inc.severity, inc.title)
+		p.markResolvedAndNotify(inc.id, hb.NodeID, inc.severity, inc.title, reason)
 	}
 }
 
-// incidentStillActive returns true when the heartbeat still exhibits the
-// condition implied by the incident title.
+// incidentResolutionReason returns a non-empty tag when the heartbeat no
+// longer exhibits the condition implied by the incident title, "" when the
+// incident is still ongoing. The tag is stored on the row so the public
+// status timeline and operator audit can distinguish:
 //
-// startedAt is the incident row's started_at (unix seconds). It's used for
-// the abandoned-container TTL: if a container has been reported as stopped
-// continuously for >abandonedContainerTTL, the incident auto-resolves so the
-// fleet status doesn't sit at "outage" forever for a long-dead container.
-func incidentStillActive(title string, hb *protocol.Heartbeat, now time.Time, startedAt int64) bool {
+//   - "auto:service_recovered" — service is back in the services list as active
+//   - "auto:service_absent"    — service was dropped from the heartbeat entirely
+//   - "auto:abandoned_ttl"     — service kept reporting stopped past abandonedContainerTTL
+//   - "auto:metric_recovered"  — high-memory pressure dropped below the 90% threshold
+//
+// startedAt is the incident row's started_at (unix seconds).
+func incidentResolutionReason(title string, hb *protocol.Heartbeat, now time.Time, startedAt int64) string {
 	// Memory pressure incidents: title is exactly "High Memory Pressure".
 	if title == "High Memory Pressure" {
-		return hb.Memory.UsedPercent > 90.0
+		if hb.Memory.UsedPercent <= 90.0 {
+			return "auto:metric_recovered"
+		}
+		return ""
 	}
 	// Docker container incidents: title is "Container Stopped: <name>".
 	const dockerPrefix = "Container Stopped: "
@@ -78,29 +86,35 @@ func incidentStillActive(title string, hb *protocol.Heartbeat, now time.Time, st
 		name := title[len(dockerPrefix):]
 		for _, s := range hb.Services {
 			if s.Name == name {
-				// Still considered active while the container is down.
+				// Container came back online.
 				if s.Active {
-					return false
+					return "auto:service_recovered"
 				}
 				// Container still stopped — give up after abandonedContainerTTL
 				// so the incident row doesn't pin the fleet at "outage" forever.
 				if startedAt > 0 && now.Sub(time.Unix(startedAt, 0)) > abandonedContainerTTL {
-					return false
+					return "auto:abandoned_ttl"
 				}
-				return true
+				return ""
 			}
 		}
 		// Service no longer reported by agent → consider it cleared so we
 		// don't leave an incident stuck forever after the agent stops
 		// shipping metrics for it.
-		return false
+		return "auto:service_absent"
 	}
-	return false
+	return ""
 }
 
-func (p *PersistentStore) markResolvedAndNotify(id int64, nodeID, severity, title string) {
+// incidentStillActive is kept as an alias to incidentResolutionReason for
+// older callers; returns true when the incident is still ongoing.
+func incidentStillActive(title string, hb *protocol.Heartbeat, now time.Time, startedAt int64) bool {
+	return incidentResolutionReason(title, hb, now, startedAt) == ""
+}
+
+func (p *PersistentStore) markResolvedAndNotify(id int64, nodeID, severity, title, reason string) {
 	p.mu.Lock()
-	res, err := p.db.Exec("UPDATE incidents SET resolved = 1, resolved_at = ? WHERE id = ? AND resolved = 0", time.Now().Unix(), id)
+	res, err := p.db.Exec("UPDATE incidents SET resolved = 1, resolved_at = ?, resolution_reason = ? WHERE id = ? AND resolved = 0", time.Now().Unix(), reason, id)
 	p.mu.Unlock()
 	if err != nil {
 		return

@@ -28,7 +28,7 @@ func (p *PersistentStore) GetPublicIncidentHistory(sinceUnix int64, limit int) (
 	}
 
 	rows, err := p.db.Query(
-		`SELECT id, node_id, severity, title, started_at, resolved, COALESCE(resolved_at, 0)
+		`SELECT id, node_id, severity, title, started_at, resolved, COALESCE(resolved_at, 0), COALESCE(resolution_reason, '')
 		   FROM incidents
 		  WHERE started_at >= ?
 		  ORDER BY started_at DESC
@@ -45,7 +45,7 @@ func (p *PersistentStore) GetPublicIncidentHistory(sinceUnix int64, limit int) (
 		var id int64
 		var e protocol.PublicIncidentHistory
 		var res int
-		if err := rows.Scan(&id, &e.NodeID, &e.Severity, &e.Title, &e.StartedAt, &res, &e.ResolvedAt); err != nil {
+		if err := rows.Scan(&id, &e.NodeID, &e.Severity, &e.Title, &e.StartedAt, &res, &e.ResolvedAt, &e.ResolutionReason); err != nil {
 			continue
 		}
 		e.ID = strconv.FormatInt(id, 10)

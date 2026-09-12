@@ -248,11 +248,21 @@
                     iList.innerHTML = data.recent_incidents.map(inc => {
                         const started = new Date(inc.started_at * 1000);
                         const resolved = inc.resolved ? ' · <span style="color:var(--accent-green)">resolved</span>' : '';
+                        const reasonLabels = {
+                            'manual': 'вручную',
+                            'auto:service_recovered': 'авто: сервис восстановлен',
+                            'auto:service_absent': 'авто: сервис снят с мониторинга',
+                            'auto:abandoned_ttl': 'авто: контейнер не вернулся >24ч',
+                            'auto:metric_recovered': 'авто: метрика в норме',
+                            'maintenance': 'maintenance window',
+                        };
+                        const reason = inc.resolution_reason ? reasonLabels[inc.resolution_reason] || inc.resolution_reason : '';
+                        const reasonHtml = reason ? ` &bull; <span style="color:var(--text-dim)">${reason}</span>` : '';
                         return `
                         <div class="service-row">
                             <div>
                                 <strong style="color: var(--accent-red); font-size: 0.95rem;">${inc.title}</strong>
-                                <div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px;">Node: ${inc.node_id} &bull; ${started.toLocaleString()}${resolved}</div>
+                                <div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px;">Node: ${inc.node_id} &bull; ${started.toLocaleString()}${resolved}${reasonHtml}</div>
                             </div>
                             <span class="pill ${inc.resolved ? 'pill-active' : 'pill-down'}">${inc.severity}</span>
                         </div>`;

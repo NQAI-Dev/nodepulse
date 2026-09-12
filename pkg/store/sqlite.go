@@ -96,7 +96,8 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		resolved INTEGER DEFAULT 0,
 		resolved_at INTEGER DEFAULT 0,
 		last_notified_at INTEGER DEFAULT 0,
-		acknowledged_at INTEGER DEFAULT 0
+		acknowledged_at INTEGER DEFAULT 0,
+		resolution_reason TEXT DEFAULT ''
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_incidents_node ON incidents(node_id, resolved);
@@ -121,6 +122,11 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN last_notified_at INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN resolved_at INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN acknowledged_at INTEGER DEFAULT 0")
+	// resolution_reason: short tag ("manual", "auto:service_recovered",
+	// "auto:service_absent", "auto:abandoned_ttl", "maintenance") so the
+	// public status timeline and operator audit can tell *why* an incident
+	// closed itself without joining against heartbeat history.
+	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN resolution_reason TEXT DEFAULT ''")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_incidents_active ON incidents(node_id, title, resolved)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_incidents_history ON incidents(started_at, resolved)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_autoheal_logs_node_ts ON autoheal_logs(node_id, ts)")
@@ -572,13 +578,15 @@ func (p *PersistentStore) notifyAfterCreate(incidentID, nodeID, severity, title,
 
 // ResolveIncident marks an incident resolved. Returns ErrIncidentNotOwned when
 // the incident exists but the user does not own the underlying node — callers
-// must map that to HTTP 403 instead of a generic 500.
+// must map that to HTTP 403 instead of a generic 500. The resolution is
+// tagged with reason="manual" so audit timelines can distinguish operator
+// action from auto-resolution paths.
 func (p *PersistentStore) ResolveIncident(id string, userID int64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	res, err := p.db.Exec(`
 		UPDATE incidents
-		   SET resolved = 1, resolved_at = ?
+		   SET resolved = 1, resolved_at = ?, resolution_reason = 'manual'
 		 WHERE id = ?
 		   AND (
 		    ? = 1

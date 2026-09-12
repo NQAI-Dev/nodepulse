@@ -68,13 +68,17 @@ type PublicUptimeSeries struct {
 
 // PublicIncidentHistory is one row on the public status timeline.
 // Severity, title, node id, and timestamps only — operator acknowledgements
-// and tenant-scoped data are intentionally excluded.
+// and tenant-scoped data are intentionally excluded. ResolutionReason is the
+// short tag written by the resolve path: "manual", "auto:service_recovered",
+// "auto:service_absent", "auto:abandoned_ttl", "auto:metric_recovered", or
+// "maintenance". Empty for incidents that are still open.
 type PublicIncidentHistory struct {
-	ID         string `json:"id"`
-	NodeID     string `json:"node_id"`
-	Severity   string `json:"severity"`
-	Title      string `json:"title"`
-	StartedAt  int64  `json:"started_at"`
-	Resolved   bool   `json:"resolved"`
-	ResolvedAt int64  `json:"resolved_at"`
+	ID               string `json:"id"`
+	NodeID           string `json:"node_id"`
+	Severity         string `json:"severity"`
+	Title            string `json:"title"`
+	StartedAt        int64  `json:"started_at"`
+	Resolved         bool   `json:"resolved"`
+	ResolvedAt       int64  `json:"resolved_at"`
+	ResolutionReason string `json:"resolution_reason,omitempty"`
 }

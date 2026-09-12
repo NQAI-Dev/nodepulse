@@ -218,7 +218,8 @@ func (p *PersistentStore) AutoCloseIncidentsInMaintenance(userID int64, nodeID s
 	defer p.mu.Unlock()
 
 	// Only auto-close *open* incidents. Resolved ones stay resolved.
-	res, err := p.db.Exec(`UPDATE incidents SET resolved = 1, resolved_at = ?
+	res, err := p.db.Exec(`UPDATE incidents SET resolved = 1, resolved_at = ?,
+		resolution_reason = CASE WHEN resolution_reason = '' THEN 'maintenance' ELSE resolution_reason END
 		WHERE resolved = 0 AND node_id = ?`,
 		now, nodeID)
 	if err != nil {
