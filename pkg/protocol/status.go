@@ -28,9 +28,22 @@ type PublicIncident struct {
 }
 
 type PublicNodeUptime struct {
-	NodeID    string  `json:"node_id"`
-	Days      int     `json:"days"`
-	UptimePct float64 `json:"uptime_pct"`
+	NodeID    string   `json:"node_id"`
+	Days      int      `json:"days"`
+	UptimePct float64  `json:"uptime_pct"`
+	Tags      []string `json:"tags,omitempty"`
+}
+
+// PublicNode is one entry on the /api/v1/public/nodes list. Combines the
+// heartbeat-driven online/warning/offline status with the persisted tag
+// set so a status widget can filter by env/region/role without a second
+// call. Empty Tags means "agent never reported any" (older 0.3.x agents).
+type PublicNode struct {
+	NodeID    string   `json:"node_id"`
+	Hostname  string   `json:"hostname"`
+	Status    string   `json:"status"`
+	Tags      []string `json:"tags,omitempty"`
+	UpdatedAt int64    `json:"updated_at"`
 }
 
 // PublicIncidentHistory is one row on the public status timeline.

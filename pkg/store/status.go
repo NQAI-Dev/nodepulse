@@ -52,12 +52,14 @@ func (p *PersistentStore) GetPublicStatus() protocol.PublicStatusPage {
 	}
 
 	uptimeRows, _ := p.AllNodesUptime(30)
+	tagMap := p.AllTaggedNodes()
 	pubUptime := make([]protocol.PublicNodeUptime, 0, len(uptimeRows))
 	for _, u := range uptimeRows {
 		pubUptime = append(pubUptime, protocol.PublicNodeUptime{
 			NodeID:    u.NodeID,
 			Days:      u.Days,
 			UptimePct: u.UptimePct,
+			Tags:      tagMap[u.NodeID],
 		})
 	}
 

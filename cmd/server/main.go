@@ -340,6 +340,18 @@ func main() {
 		})
 	})
 
+	mux.HandleFunc("GET /api/v1/public/nodes", func(w http.ResponseWriter, r *http.Request) {
+		tag := r.URL.Query().Get("tag")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=10")
+		nodes := pStore.ListPublicNodes(tag)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"items": nodes,
+			"count": len(nodes),
+			"tag":   tag,
+		})
+	})
+
 	mux.HandleFunc("GET /api/v1/public/incidents/histogram", func(w http.ResponseWriter, r *http.Request) {
 		days := 30
 		if v := r.URL.Query().Get("days"); v != "" {

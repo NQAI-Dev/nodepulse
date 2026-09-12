@@ -15,6 +15,7 @@ import (
 type Collector struct {
 	nodeID        string
 	monitoredUnits []string
+	tags          []string
 }
 
 func New(nodeID string, monitoredUnits []string) *Collector {
@@ -22,6 +23,25 @@ func New(nodeID string, monitoredUnits []string) *Collector {
 		nodeID:        nodeID,
 		monitoredUnits: monitoredUnits,
 	}
+}
+
+// WithTags attaches the agent's static tags so every heartbeat reports them.
+// Pass-through: agent reads --tags / NODEPULSE_TAGS once at startup and
+// calls this before the heartbeat loop begins.
+func (c *Collector) WithTags(tags []string) *Collector {
+	c.tags = ParseTags(joinTags(tags))
+	return c
+}
+
+func joinTags(in []string) string {
+	out := make([]string, 0, len(in))
+	for _, t := range in {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 func (c *Collector) Collect() (*protocol.Heartbeat, error) {
@@ -36,6 +56,7 @@ func (c *Collector) Collect() (*protocol.Heartbeat, error) {
 			OS:       runtime.GOOS,
 			Arch:     runtime.GOARCH,
 			Version:  "0.3.0-enterprise",
+			Tags:     c.tags,
 		},
 		CPU: protocol.CPUStats{
 			Cores: runtime.NumCPU(),

@@ -167,6 +167,17 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_whdel_user_ts ON webhook_deliveries(user_id, ts)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_whdel_ts ON webhook_deliveries(ts)")
 
+	// Node tags: persisted copy of the agent-reported labels. Stored as a
+	// newline-separated list (one tag per line) so the LIKE-based filter
+	// path doesn't need a JSON parser and can match `env=prod` exactly.
+	// updated_at drives "since X" queries for status widgets that only
+	// care about recently-tagged fleets.
+	db.Exec(`CREATE TABLE IF NOT EXISTS node_tags (
+		node_id TEXT PRIMARY KEY,
+		tags TEXT NOT NULL DEFAULT '',
+		updated_at INTEGER NOT NULL
+	)`)
+
 	// Create admin user if not exists
 	var adminID int64
 	err = db.QueryRow("SELECT id FROM users WHERE username = 'admin'").Scan(&adminID)
@@ -345,6 +356,15 @@ func (p *PersistentStore) ValidateToken(token string) bool {
 
 func (p *PersistentStore) Ingest(hb *protocol.Heartbeat) {
 	p.mem.Ingest(hb)
+
+	// Persist the latest tag set alongside the heartbeat so the public
+	// status page and tag-filter endpoint reflect the same labels without
+	// joining against the in-memory store. Older agents send no Tags.
+	if len(hb.Node.Tags) > 0 {
+		if err := p.UpsertNodeTags(hb.NodeID, hb.Node.Tags); err != nil {
+			log.Printf("node tags upsert: %v", err)
+		}
+	}
 
 	if _, err := p.RecordHeartbeat(hb.NodeID, time.Now()); err != nil {
 		log.Printf("uptime rollup: %v", err)

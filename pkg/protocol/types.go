@@ -2,11 +2,15 @@ package protocol
 
 
 type NodeInfo struct {
-	ID       string `json:"id"`
-	Hostname string `json:"hostname"`
-	OS       string `json:"os"`
-	Arch     string `json:"arch"`
-	Version  string `json:"version"`
+	ID       string   `json:"id"`
+	Hostname string   `json:"hostname"`
+	OS       string   `json:"os"`
+	Arch     string   `json:"arch"`
+	Version  string   `json:"version"`
+	// Tags are free-form key=value (or plain) labels attached by the agent:
+	// typical values are env=prod, region=eu, role=db. Empty in older agents
+	// so the field stays backwards-compatible on the wire and in SQLite.
+	Tags []string `json:"tags,omitempty"`
 }
 
 type CPUStats struct {

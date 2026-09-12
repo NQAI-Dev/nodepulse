@@ -23,6 +23,7 @@ func main() {
 	token := flag.String("token", "", "NodePulse Ingest API Token")
 	interval := flag.Duration("interval", 10*time.Second, "Heartbeat interval")
 	unitsFlag := flag.String("units", "", "Comma-separated systemd units to monitor")
+	tagsFlag := flag.String("tags", "", "Comma-separated node tags, e.g. env=prod,region=eu,role=db")
 	dryRun := flag.Bool("dry-run", false, "Collect and print without network push")
 	flag.Parse()
 
@@ -54,7 +55,7 @@ func main() {
 		}
 	}
 
-	c := collector.New(*nodeID, units)
+	c := collector.New(*nodeID, units).WithTags(collector.TagsFromEnv(*tagsFlag))
 	client := &http.Client{Timeout: 5 * time.Second}
 	breaker := autoheal.NewBreaker()
 
