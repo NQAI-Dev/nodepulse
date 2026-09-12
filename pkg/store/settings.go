@@ -9,7 +9,10 @@ import (
 func (p *PersistentStore) GetSettings(userID int64) (*protocol.UserSettings, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.getSettingsLocked(userID)
+}
 
+func (p *PersistentStore) getSettingsLocked(userID int64) (*protocol.UserSettings, error) {
 	var s protocol.UserSettings
 	var crit, warn int
 	err := p.db.QueryRow(`

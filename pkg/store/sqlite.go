@@ -220,7 +220,7 @@ func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string)
 		p.db.Exec("INSERT INTO incidents (node_id, severity, title, detail, started_at, resolved) VALUES (?, ?, ?, ?, ?, 0)",
 			nodeID, severity, title, detail, time.Now().Unix())
 		ownerID, _ := p.GetNodeOwner(nodeID)
-		settings, _ := p.GetSettings(ownerID)
+		settings, _ := p.getSettingsLocked(ownerID)
 		shouldNotify := true
 		if settings != nil {
 			if severity == "critical" && !settings.NotifyCritical {
