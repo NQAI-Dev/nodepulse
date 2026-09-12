@@ -81,6 +81,12 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		return nil, err
 	}
 
+	// Idempotent migrations for older databases.
+	// We ADD COLUMN last_notified_at if it doesn't exist (ignore errors
+	// that indicate the column already exists).
+	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN last_notified_at INTEGER DEFAULT 0")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_incidents_active ON incidents(node_id, title, resolved)")
+
 	// Create admin user if not exists
 	var adminID int64
 	err = db.QueryRow("SELECT id FROM users WHERE username = 'admin'").Scan(&adminID)
@@ -215,51 +221,95 @@ func (p *PersistentStore) Ingest(hb *protocol.Heartbeat) {
 	p.ResolveStaleIncidents(hb)
 }
 
+// cooldownFor returns the minimum gap between two notifications for the same
+// (node, title) incident. Critical alerts fire faster than warnings because
+// each is more likely to demand an immediate action.
+//
+// ponytail: real values should come from per-tenant config; current defaults
+// tune for ~10s agent cadence. If agents drop to 1s, halve these to avoid
+// alert starvation, or add a backoff state in the incidents table.
+func cooldownFor(severity string) time.Duration {
+	if severity == "critical" {
+		return 60 * time.Second
+	}
+	return 5 * time.Minute
+}
+
 func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	var exists int
-	err := p.db.QueryRow("SELECT COUNT(*) FROM incidents WHERE node_id = ? AND title = ? AND resolved = 0", nodeID, title).Scan(&exists)
-	if err == nil && exists == 0 {
-		p.db.Exec("INSERT INTO incidents (node_id, severity, title, detail, started_at, resolved) VALUES (?, ?, ?, ?, ?, 0)",
-			nodeID, severity, title, detail, time.Now().Unix())
-		ownerID, _ := p.GetNodeOwner(nodeID)
-		settings, _ := p.getSettingsLocked(ownerID)
-		shouldNotify := true
-		if settings != nil {
-			if severity == "critical" && !settings.NotifyCritical {
-				shouldNotify = false
-			}
-			if severity == "warning" && !settings.NotifyWarning {
-				shouldNotify = false
+	now := time.Now()
+	nowUnix := now.Unix()
+
+	var openID int64
+	var lastNotified int64
+	err := p.db.QueryRow(
+		"SELECT id, last_notified_at FROM incidents WHERE node_id = ? AND title = ? AND resolved = 0 ORDER BY id DESC LIMIT 1",
+		nodeID, title,
+	).Scan(&openID, &lastNotified)
+
+	if err == sql.ErrNoRows {
+		// No open incident: create one and notify.
+		p.db.Exec(
+			"INSERT INTO incidents (node_id, severity, title, detail, started_at, resolved, last_notified_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+			nodeID, severity, title, detail, nowUnix, nowUnix,
+		)
+		p.notifyAfterCreate(nodeID, severity, title, detail, nowUnix)
+		return
+	}
+	if err != nil {
+		return
+	}
+
+	// Open incident already exists. Refresh detail (it's the latest snapshot)
+	// and decide whether to re-notify.
+	p.db.Exec("UPDATE incidents SET detail = ? WHERE id = ?", detail, openID)
+
+	if lastNotified == 0 || nowUnix-lastNotified >= int64(cooldownFor(severity).Seconds()) {
+		p.db.Exec("UPDATE incidents SET last_notified_at = ? WHERE id = ?", nowUnix, openID)
+		p.notifyAfterCreate(nodeID, severity, title, detail, nowUnix)
+	}
+}
+
+// notifyAfterCreate handles dispatch (Telegram + Webhook) for a freshly created
+// or re-fired incident. The caller decides when this runs (always on insert,
+// and on cooldown expiry for repeated crossings).
+func (p *PersistentStore) notifyAfterCreate(nodeID, severity, title, detail string, ts int64) {
+	ownerID, _ := p.GetNodeOwner(nodeID)
+	settings, _ := p.getSettingsLocked(ownerID)
+	if settings == nil {
+		return
+	}
+	if severity == "critical" && !settings.NotifyCritical {
+		return
+	}
+	if severity == "warning" && !settings.NotifyWarning {
+		return
+	}
+
+	if p.alerter != nil {
+		tgChat := p.alerter.GetChatID()
+		if settings.TelegramChatID != "" {
+			if parsed, err := strconv.ParseInt(settings.TelegramChatID, 10, 64); err == nil && parsed != 0 {
+				tgChat = parsed
 			}
 		}
-		if shouldNotify {
-			if p.alerter != nil {
-				tgChat := p.alerter.GetChatID()
-				if settings != nil && settings.TelegramChatID != "" {
-					if parsed, err := strconv.ParseInt(settings.TelegramChatID, 10, 64); err == nil && parsed != 0 {
-						tgChat = parsed
-					}
-				}
-				go p.alerter.NotifyIncidentTo(tgChat, nodeID, severity, title, detail)
-			}
-			if settings != nil && settings.WebhookURL != "" && p.webhook != nil {
-				whEvent := protocol.WebhookAlert{
-					Event: "incident.created",
-					Timestamp: time.Now().Unix(),
-					Incident: &protocol.Incident{
-						NodeID: nodeID,
-						Severity: severity,
-						Title: title,
-						Detail: detail,
-						StartedAt: time.Now().Unix(),
-					},
-				}
-				go p.webhook.DispatchSigned(settings.WebhookURL, settings.WebhookSecret, whEvent)
-			}
+		go p.alerter.NotifyIncidentTo(tgChat, nodeID, severity, title, detail)
+	}
+	if p.webhook != nil && settings.WebhookURL != "" {
+		whEvent := protocol.WebhookAlert{
+			Event:     "incident.created",
+			Timestamp: ts,
+			Incident: &protocol.Incident{
+				NodeID:    nodeID,
+				Severity:  severity,
+				Title:     title,
+				Detail:    detail,
+				StartedAt: ts,
+			},
 		}
+		go p.webhook.DispatchSigned(settings.WebhookURL, settings.WebhookSecret, whEvent)
 	}
 }
 
