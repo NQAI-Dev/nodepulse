@@ -5,43 +5,45 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/NQAI-Dev/nodepulse/pkg/protocol"
 )
 
 func TestWebhookDispatcher(t *testing.T) {
 	received := make(chan protocol.WebhookAlert, 1)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var alert protocol.WebhookAlert
-		if err := json.NewDecoder(r.Body).Decode(&alert); err != nil {
-			t.Errorf("failed to decode alert: %v", err)
-			return
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var a protocol.WebhookAlert
+		if err := json.NewDecoder(r.Body).Decode(&a); err == nil {
+			received <- a
 		}
-		received <- alert
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer server.Close()
+	defer ts.Close()
 
-	d := NewWebhookDispatcher([]string{server.URL})
-	inc := protocol.Incident{
-		ID:        "101",
-		NodeID:    "test-node-1",
-		Severity:  "critical",
-		Title:     "Test Panic",
-		Detail:    "Crash detected",
-		StartedAt: 12345678,
+	d := NewWebhook()
+	err := d.Dispatch(ts.URL, protocol.WebhookAlert{
+		Event:     "incident.created",
+		Timestamp: time.Now().Unix(),
+		Incident: &protocol.Incident{
+			ID:       "1",
+			NodeID:   "test-node",
+			Severity: "critical",
+			Title:    "Test alert",
+			Detail:   "Detailed message",
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("dispatch error: %v", err)
 	}
 
-	d.DispatchIncident(inc)
-
 	select {
-	case alert := <-received:
-		if alert.Event != "incident.created" {
-			t.Errorf("expected event incident.created, got %s", alert.Event)
+	case a := <-received:
+		if a.Event != "incident.created" || a.Incident.NodeID != "test-node" {
+			t.Fatalf("unexpected payload: %+v", a)
 		}
-		if alert.Incident.NodeID != "test-node-1" {
-			t.Errorf("expected node test-node-1, got %s", alert.Incident.NodeID)
-		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("webhook not received in time")
 	}
 }

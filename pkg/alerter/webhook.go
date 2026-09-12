@@ -3,7 +3,6 @@ package alerter
 import (
 	"bytes"
 	"encoding/json"
-	"log"
 	"net/http"
 	"time"
 
@@ -11,48 +10,31 @@ import (
 )
 
 type WebhookDispatcher struct {
-	endpoints []string
-	client    *http.Client
+	client *http.Client
 }
 
-func NewWebhookDispatcher(endpoints []string) *WebhookDispatcher {
+func NewWebhook() *WebhookDispatcher {
 	return &WebhookDispatcher{
-		endpoints: endpoints,
-		client:    &http.Client{Timeout: 5 * time.Second},
+		client: &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
-func (w *WebhookDispatcher) DispatchIncident(inc protocol.Incident) {
-	if len(w.endpoints) == 0 {
-		return
-	}
+func NewWebhookDispatcher() *WebhookDispatcher {
+	return NewWebhook()
+}
 
-	payload := protocol.WebhookAlert{
-		Event:     "incident.created",
-		Incident:  inc,
-		Timestamp: time.Now().Unix(),
+func (w *WebhookDispatcher) Dispatch(url string, event protocol.WebhookAlert) error {
+	if url == "" {
+		return nil
 	}
-
-	data, err := json.Marshal(payload)
+	body, err := json.Marshal(event)
 	if err != nil {
-		return
+		return err
 	}
-
-	for _, endpoint := range w.endpoints {
-		go func(url string) {
-			req, err := http.NewRequest("POST", url, bytes.NewReader(data))
-			if err != nil {
-				return
-			}
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("User-Agent", "NodePulse-Webhook/1.0")
-
-			resp, err := w.client.Do(req)
-			if err != nil {
-				log.Printf("[webhook] failed delivery to %s: %v", url, err)
-				return
-			}
-			resp.Body.Close()
-		}(endpoint)
+	resp, err := w.client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
 	}
+	defer resp.Body.Close()
+	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/NQAI-Dev/nodepulse/pkg/protocol"
@@ -17,101 +18,148 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "Listen address")
 	dbPath := flag.String("db", "nodepulse_fleet.db", "SQLite database path")
+	botToken := flag.String("tg-token", "", "Telegram Bot Token for alerts")
+	chatIDStr := flag.String("tg-chat", "", "Telegram Chat ID for alerts")
 	flag.Parse()
 
-	botToken := os.Getenv("NODEPULSE_BOT_TOKEN")
-	chatIDStr := os.Getenv("NODEPULSE_ALERT_CHAT_ID")
-	var chatID int64
-	if chatIDStr != "" {
-		chatID, _ = strconv.ParseInt(chatIDStr, 10, 64)
+	token := *botToken
+	if token == "" {
+		token = os.Getenv("NODEPULSE_TG_TOKEN")
 	}
 
-	pStore, err := store.NewPersistentStore(*dbPath, botToken, chatID)
+	var chatID int64
+	cStr := *chatIDStr
+	if cStr == "" {
+		cStr = os.Getenv("NODEPULSE_TG_CHAT")
+	}
+	if cStr != "" {
+		chatID, _ = strconv.ParseInt(cStr, 10, 64)
+	}
+
+	pStore, err := store.NewPersistentStore(*dbPath, token, chatID)
 	if err != nil {
 		log.Fatalf("Store initialization failure: %v", err)
 	}
 
 	mux := http.NewServeMux()
 
-	// Ingestion endpoint for agents
+	// 1. Auth endpoints
+	mux.HandleFunc("POST /api/v1/auth/register", func(w http.ResponseWriter, r *http.Request) {
+		var req protocol.AuthRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Username) == "" || len(req.Password) < 6 {
+			http.Error(w, `{"error":"username required, password min 6 chars"}`, http.StatusBadRequest)
+			return
+		}
+		uid, tok, err := pStore.Register(req.Username, req.Password)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusConflict)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(protocol.AuthResponse{
+			Token: tok,
+			User: protocol.User{
+				ID:       fmt.Sprintf("%d", uid),
+				Username: req.Username,
+			},
+		})
+	})
+
+	mux.HandleFunc("POST /api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		var req protocol.AuthRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			return
+		}
+		uid, tok, err := pStore.Authenticate(req.Username, req.Password)
+		if err != nil {
+			http.Error(w, `{"error":"invalid credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(protocol.AuthResponse{
+			Token: tok,
+			User: protocol.User{
+				ID:       fmt.Sprintf("%d", uid),
+				Username: req.Username,
+			},
+		})
+	})
+
+	// Helper to extract authenticated user
+	getUser := func(r *http.Request) (int64, string, error) {
+		auth := r.Header.Get("Authorization")
+		tok := strings.TrimPrefix(auth, "Bearer ")
+		if tok == "" {
+			tok = r.URL.Query().Get("token")
+		}
+		return pStore.GetUserByToken(tok)
+	}
+
+	// 2. Ingestion endpoint for agents (supports token verification and node binding)
 	mux.HandleFunc("POST /api/v1/ingest", func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("X-NodePulse-Token")
 		if token == "" {
 			token = r.URL.Query().Get("token")
 		}
 
-		if token != "" && !pStore.ValidateToken(token) && token != "np_live_master_secret" {
+		uid, _, err := pStore.GetUserByToken(token)
+		if err != nil && token != "np_live_master_secret" {
 			http.Error(w, `{"error":"unauthorized node token"}`, http.StatusUnauthorized)
 			return
 		}
 
 		var hb protocol.Heartbeat
-		if err := json.NewDecoder(r.Body).Decode(&hb); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if hb.NodeID == "" {
-			http.Error(w, "missing node_id", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&hb); err != nil || hb.NodeID == "" {
+			http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
 			return
 		}
 
+		if uid > 0 {
+			pStore.BindNode(hb.NodeID, uid)
+		}
 		pStore.Ingest(&hb)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(protocol.HeartbeatResponse{Acknowledged: true})
 	})
 
-	// Fleet Nodes API
+	// 3. User Fleet Nodes API (isolated per user)
 	mux.HandleFunc("GET /api/v1/nodes", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			// fallback to public/demo mode (admin view for backwards compat if unauthed)
+			uid = 1
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(pStore.GetAll())
+		json.NewEncoder(w).Encode(pStore.GetUserNodes(uid))
 	})
 
-	// Incidents API
+	// 4. Incidents API (isolated per user)
 	mux.HandleFunc("GET /api/v1/incidents", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			uid = 1
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(pStore.GetActiveIncidents())
+		json.NewEncoder(w).Encode(pStore.GetActiveIncidents(uid))
 	})
 
-	// Resolve Incident API
 	mux.HandleFunc("POST /api/v1/incidents/resolve", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("id")
 		if id == "" {
-			http.Error(w, "missing id", http.StatusBadRequest)
+			http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
 			return
 		}
 		if err := pStore.ResolveIncident(id); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, `{"error":"resolve failure"}`, http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"success":true}`))
+		w.Write([]byte(`{"success":true}` + "\n"))
 	})
 
-	// Prometheus Metrics Endpoint
-	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		nodes := pStore.GetAll()
-		incidents := pStore.GetActiveIncidents()
-
-		fmt.Fprintf(w, "# HELP nodepulse_nodes_total Total registered nodes\n# TYPE nodepulse_nodes_total gauge\nnodepulse_nodes_total %d\n", len(nodes))
-		fmt.Fprintf(w, "# HELP nodepulse_incidents_active Active incidents count\n# TYPE nodepulse_incidents_active gauge\nnodepulse_incidents_active %d\n", len(incidents))
-
-		for nodeID, state := range nodes {
-			statusVal := 0
-			if state.Status == "online" {
-				statusVal = 1
-			}
-			fmt.Fprintf(w, "nodepulse_node_online{node=\"%s\"} %d\n", nodeID, statusVal)
-			if state.Latest.NodeID != "" {
-				fmt.Fprintf(w, "nodepulse_node_cpu_load1{node=\"%s\"} %.2f\n", nodeID, state.Latest.CPU.Load1)
-				fmt.Fprintf(w, "nodepulse_node_memory_used_bytes{node=\"%s\"} %d\n", nodeID, state.Latest.Memory.UsedBytes)
-				fmt.Fprintf(w, "nodepulse_node_memory_total_bytes{node=\"%s\"} %d\n", nodeID, state.Latest.Memory.TotalBytes)
-			}
-		}
-	})
-
-	// Dynamic 1-line installation script generator
+	// 5. Dynamic 1-line installation script generator with user token
 	mux.HandleFunc("GET /install.sh", func(w http.ResponseWriter, r *http.Request) {
 		token := r.URL.Query().Get("token")
 		if token == "" {
@@ -120,7 +168,7 @@ func main() {
 		w.Header().Set("Content-Type", "text/x-shellscript")
 		script := fmt.Sprintf(`#!/bin/sh
 set -e
-echo "==> [NodePulse] Starting rapid agent installation..."
+echo "==> [NodePulse] Installing NodePulse Enterprise Agent..."
 SERVER_URL="https://pulse.nqai.es-cloud.ru"
 TOKEN="%s"
 NODE_ID="$(hostname)"
@@ -137,7 +185,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/nodepulse-agent -node ${NODE_ID} -server ${SERVER_URL}/api/v1/ingest
-Environment=NODEPULSE_TOKEN=${TOKEN}
+Environment=NODEPULSE_TOKEN=%s
 Restart=always
 RestartSec=5
 
@@ -148,16 +196,14 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now nodepulse-agent.service
 echo "==> [NodePulse] Agent installed and registered successfully as ${NODE_ID}!"
-`, token)
+`, token, token)
 		w.Write([]byte(script))
 	})
 
-	// Serve compiled agent binary directly for installer
 	mux.HandleFunc("GET /bin/nodepulse-agent", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "bin/nodepulse-agent")
 	})
 
-	// Public Health
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok","system":"nodepulse-platform"}` + "\n"))
@@ -173,7 +219,7 @@ echo "==> [NodePulse] Agent installed and registered successfully as ${NODE_ID}!
 		WriteTimeout: 5 * time.Second,
 	}
 
-	log.Printf("NodePulse Platform Control Plane running on %s", *addr)
+	log.Printf("NodePulse Platform v1.0 running on %s", *addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
