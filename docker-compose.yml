@@ -1,0 +1,14 @@
+services:
+  control-plane:
+    build: .
+    container_name: nodepulse-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+    volumes:
+      - nodepulse-data:/app/data
+
+volumes:
+  nodepulse-data:
