@@ -95,6 +95,46 @@ func TestSuccessDoesNotTripBreaker(t *testing.T) {
 	}
 }
 
+func TestRecordCrashOpensBreakerAfterRepeatedCrashes(t *testing.T) {
+	b := NewBreaker()
+	b.burstLimit = 3
+	b.openFor = 200 * time.Millisecond
+	b.cooldown = 0 // let the breaker logic dominate; no cooldown gate
+	key := "restart_docker:crashloop"
+
+	for i := 0; i < 3; i++ {
+		if !b.Allow(key).Allowed {
+			t.Fatalf("attempt %d must be allowed (cooldown gate off)", i+1)
+		}
+		b.Record(key, nil) // docker start succeeded
+		b.RecordCrash(key) // but the container exited again
+	}
+
+	got := b.Allow(key)
+	if got.Allowed {
+		t.Fatalf("breaker should open after %d crash observations", 3)
+	}
+	if got.Reason != "circuit_open" {
+		t.Fatalf("expected circuit_open, got %q", got.Reason)
+	}
+}
+
+func TestRecordCrashRespectsCooldownGate(t *testing.T) {
+	b := NewBreaker()
+	b.burstLimit = 3
+	key := "restart_docker:quiet"
+	b.RecordCrash(key)
+	b.RecordCrash(key) // still under threshold
+
+	// Cooldown gate must still trip on Allow.
+	if !b.Allow(key).Allowed {
+		t.Fatalf("first Allow after crashes must pass cooldown")
+	}
+	if b.Allow(key).Allowed {
+		t.Fatalf("second Allow within cooldown must be blocked")
+	}
+}
+
 type stubErr string
 
 func (e stubErr) Error() string { return string(e) }

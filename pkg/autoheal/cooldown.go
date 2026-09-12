@@ -33,6 +33,7 @@ type Breaker struct {
 
 	lastAttempt map[string]time.Time
 	attempts    map[string][]time.Time // recent attempts within burstWindow
+	crashes     map[string][]time.Time // recent crash observations within burstWindow (post-restart exited)
 	opensAt     map[string]time.Time   // circuit-open-until timestamp
 }
 
@@ -44,6 +45,7 @@ func NewBreaker() *Breaker {
 		openFor:     5 * time.Minute,
 		lastAttempt: make(map[string]time.Time),
 		attempts:    make(map[string][]time.Time),
+		crashes:     make(map[string][]time.Time),
 		opensAt:     make(map[string]time.Time),
 	}
 }
@@ -97,6 +99,34 @@ func (b *Breaker) Allow(key string) Result {
 		Allowed: true,
 		Target:  key,
 		Reason:  "ok",
+	}
+}
+
+// RecordCrash feeds a post-restart observation that the target is still
+// down (e.g. Docker container exited again within seconds of `docker
+// restart`). Distinct from Record() because the restart itself usually
+// succeeds — only the post-check reveals the crash-loop. Each crash counts
+// toward burstLimit in its own window; at the threshold the breaker opens
+// immediately.
+func (b *Breaker) RecordCrash(key string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := time.Now()
+
+	window := b.crashes[key]
+	cutoff := now.Add(-b.burstWindow)
+	out := window[:0]
+	for _, t := range window {
+		if t.After(cutoff) {
+			out = append(out, t)
+		}
+	}
+	window = append(out, now)
+	b.crashes[key] = window
+
+	if len(window) >= b.burstLimit {
+		b.opensAt[key] = now.Add(b.openFor)
+		b.crashes[key] = nil
 	}
 }
 

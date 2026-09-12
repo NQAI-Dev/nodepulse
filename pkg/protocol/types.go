@@ -68,6 +68,7 @@ type Heartbeat struct {
 	Disks     []DiskStats     `json:"disks"`
 	Network   []NetStats      `json:"network,omitempty"`
 	Services  []ServiceStatus `json:"services,omitempty"`
+	Probes    []ProbeResult   `json:"probes,omitempty"`
 }
 
 type HeartbeatResponse struct {
@@ -87,4 +88,28 @@ type AutoHealLog struct {
 	Error    string `json:"error,omitempty"`
 	Ts       int64  `json:"ts"`
 	RetrySec int64  `json:"retry_sec,omitempty"`
+}
+
+// ProbeResult is one synthetic HTTP probe executed by the agent against a
+// configured target URL. Agents attach up to N results per heartbeat so the
+// control plane can track external availability without running its own
+// scanner fleet. URL is the canonical target identifier (the operator
+// configures it once and reuses the value across all results). StatusCode
+// is 0 if the request never reached a response (DNS, TCP, TLS, timeout).
+// LatencyMs is wall-clock from request start to response headers read; for
+// transport errors we still record the time spent failing so the latency
+// series tells a useful story. Error is populated when StatusCode == 0.
+//
+// ponytail: this struct deliberately mirrors ServiceStatus shape so the
+// public status page can render probes and docker/systemd checks with one
+// widget. If we add TCP probes or DNS probes later, switch the type to a
+// tagged union or add a Kind field; for now the on-the-wire cost is lower
+// with a flat struct.
+type ProbeResult struct {
+	URL        string `json:"url"`
+	StatusCode int    `json:"status_code"`
+	LatencyMs  int64  `json:"latency_ms"`
+	OK         bool   `json:"ok"`
+	Error      string `json:"error,omitempty"`
+	Ts         int64  `json:"ts"`
 }

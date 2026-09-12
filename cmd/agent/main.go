@@ -14,6 +14,7 @@ import (
 
 	"github.com/NQAI-Dev/nodepulse/pkg/autoheal"
 	"github.com/NQAI-Dev/nodepulse/pkg/collector"
+	"github.com/NQAI-Dev/nodepulse/pkg/probe"
 	"github.com/NQAI-Dev/nodepulse/pkg/protocol"
 )
 
@@ -25,6 +26,9 @@ func main() {
 	unitsFlag := flag.String("units", "", "Comma-separated systemd units to monitor")
 	tagsFlag := flag.String("tags", "", "Comma-separated node tags, e.g. env=prod,region=eu,role=db")
 	dryRun := flag.Bool("dry-run", false, "Collect and print without network push")
+	probeURLs := flag.String("probe-urls", "", "Comma-separated HTTP URLs to probe on every heartbeat (e.g. https://api.example.com/health)")
+	probeTimeout := flag.Duration("probe-timeout", 5*time.Second, "Per-probe wall-clock timeout")
+	probeFollowRedirect := flag.Bool("probe-follow-redirect", false, "Follow HTTP 3xx redirects during probes (off by default)")
 	flag.Parse()
 
 	if *token == "" {
@@ -58,6 +62,13 @@ func main() {
 	c := collector.New(*nodeID, units).WithTags(collector.TagsFromEnv(*tagsFlag))
 	client := &http.Client{Timeout: 5 * time.Second}
 	breaker := autoheal.NewBreaker()
+
+	probeTargets := splitCSV(*probeURLs, os.Getenv("NODEPULSE_PROBE_URLS"))
+	prober := probe.NewRunner(probeTargets, *probeTimeout, *probeFollowRedirect)
+	if len(probeTargets) > 0 {
+		log.Printf("Synthetic probes enabled: %d target(s), timeout=%s, follow_redirect=%v",
+			len(prober.Targets()), *probeTimeout, *probeFollowRedirect)
+	}
 
 	var pendingMu sync.Mutex
 	pending := []protocol.AutoHealLog{}
@@ -107,6 +118,20 @@ func main() {
 			log.Printf("Collection failure: %v", err)
 			time.Sleep(*interval)
 			continue
+		}
+
+		// Attach synthetic probe results to the heartbeat when probes are
+		// configured. We run them after collection so a slow probe cannot
+		// block the system metrics snapshot, but before marshal so the
+		// results ride on the same payload. Failures are isolated per
+		// target and never abort the batch.
+		if len(probeTargets) > 0 {
+			hb.Probes = prober.Run()
+			for _, p := range hb.Probes {
+				if !p.OK {
+					log.Printf("Probe %s failed: status=%d err=%q", p.URL, p.StatusCode, p.Error)
+				}
+			}
 		}
 
 		data, err := json.Marshal(hb)
@@ -196,4 +221,25 @@ func errString(e error) string {
 		return ""
 	}
 	return e.Error()
+}
+
+// splitCSV returns the comma-separated values from `direct` (the flag value)
+// with `fallback` used when direct is empty. Empty entries are dropped so
+// operators can leave trailing commas in their config without errors.
+func splitCSV(direct, fallback string) []string {
+	src := direct
+	if src == "" {
+		src = fallback
+	}
+	if src == "" {
+		return nil
+	}
+	parts := strings.Split(src, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }

@@ -233,6 +233,16 @@ func main() {
 		}
 		pStore.Ingest(&hb)
 
+		// Persist synthetic HTTP probe results (if the agent sent any).
+		// Failures here must NOT poison the heartbeat response — the
+		// probe pipeline is best-effort telemetry, never a hard
+		// dependency of ingest.
+		if len(hb.Probes) > 0 {
+			if err := pStore.RecordProbeResults(hb.NodeID, hb.Probes); err != nil {
+				log.Printf("probe persist failed for node %s: %v", hb.NodeID, err)
+			}
+		}
+
 		// Evaluate auto-heal remediation commands
 		commands := pStore.EvaluateAutoHeal(&hb)
 
@@ -349,6 +359,27 @@ func main() {
 			"items": nodes,
 			"count": len(nodes),
 			"tag":   tag,
+		})
+	})
+
+	mux.HandleFunc("GET /api/v1/public/probes", func(w http.ResponseWriter, r *http.Request) {
+		windowSecs := int64(86400)
+		if v := r.URL.Query().Get("window"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 && n <= 604800 {
+				windowSecs = n
+			}
+		}
+		summaries, err := pStore.ProbeSummaries(windowSecs)
+		if err != nil {
+			http.Error(w, `{"error":"probes query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// short TTL — probe fleet can change fast and the page polls
+		w.Header().Set("Cache-Control", "public, max-age=15")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"items": summaries,
+			"count": len(summaries),
 		})
 	})
 

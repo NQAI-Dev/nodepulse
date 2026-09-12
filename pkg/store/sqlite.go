@@ -234,6 +234,19 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	);
 	CREATE INDEX IF NOT EXISTS idx_network_node_ts ON network_samples(node_id, ts);
 	CREATE INDEX IF NOT EXISTS idx_network_node_iface_ts ON network_samples(node_id, iface, ts);
+
+	CREATE TABLE IF NOT EXISTS probe_results (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		node_id TEXT NOT NULL,
+		url TEXT NOT NULL,
+		status_code INTEGER NOT NULL DEFAULT 0,
+		latency_ms INTEGER NOT NULL DEFAULT 0,
+		ok INTEGER NOT NULL DEFAULT 0,
+		error TEXT DEFAULT '',
+		ts INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_probes_url_ts ON probe_results(url, ts);
+	CREATE INDEX IF NOT EXISTS idx_probes_node_ts ON probe_results(node_id, ts);
 	`
 	if _, err := db.Exec(uptimeSchema); err != nil {
 		return nil, err
