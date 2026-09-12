@@ -220,7 +220,42 @@ func main() {
 		json.NewEncoder(w).Encode(pStore.GetUserNodes(uid))
 	})
 
-	// 5. Incidents API
+	// 5. Settings API
+	mux.HandleFunc("GET /api/v1/settings", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		settings, err := pStore.GetSettings(uid)
+		if err != nil {
+			http.Error(w, `{"error":"failed to fetch settings"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(settings)
+	})
+
+	mux.HandleFunc("POST /api/v1/settings", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		var req protocol.UserSettings
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid settings payload"}`, http.StatusBadRequest)
+			return
+		}
+		if err := pStore.UpdateSettings(uid, req.TelegramChatID, req.WebhookURL, req.NotifyCritical, req.NotifyWarning); err != nil {
+			http.Error(w, `{"error":"failed to update settings"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"success": true})
+	})
+
+	// 6. Incidents API
 	mux.HandleFunc("GET /api/v1/incidents", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, err := getUser(r)
 		if err != nil {
