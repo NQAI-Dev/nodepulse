@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"log"
 	"sync"
 	"time"
@@ -157,6 +158,229 @@ func (p *PersistentStore) LatestNetworkRates(nodeID string) []NetworkRate {
 		_ = last
 	}
 	return out
+}
+
+// NetworkTotals is the snapshot view for a single interface: latest absolute
+// counters plus the rolling-window rate computed over the supplied range.
+// Returned by NetworkSummary for each iface the agent has reported.
+type NetworkTotals struct {
+	Iface         string  `json:"iface"`
+	RxBytes       uint64  `json:"rx_bytes"`
+	TxBytes       uint64  `json:"tx_bytes"`
+	RxPackets     uint64  `json:"rx_packets"`
+	TxPackets     uint64  `json:"tx_packets"`
+	RxErrors      uint64  `json:"rx_errors"`
+	TxErrors      uint64  `json:"tx_errors"`
+	RxDrops       uint64  `json:"rx_drops"`
+	TxDrops       uint64  `json:"tx_drops"`
+	RxBytesPerSec float64 `json:"rx_bps"`
+	TxBytesPerSec float64 `json:"tx_bps"`
+	RxPacketsPerSec float64 `json:"rx_pps"`
+	TxPacketsPerSec float64 `json:"tx_pps"`
+	RxErrorsPerSec  float64 `json:"rx_errps"`
+	TxErrorsPerSec  float64 `json:"tx_errps"`
+	RxDropsPerSec   float64 `json:"rx_dropps"`
+	TxDropsPerSec   float64 `json:"tx_dropps"`
+	LatestTs       int64   `json:"latest_ts"`
+}
+
+// NetworkSummary returns the latest sample + windowed-rate view per iface
+// for a node. The script-friendly bucketed average keeps the response
+// bounded regardless of how many samples landed inside the window.
+func (p *PersistentStore) NetworkSummary(nodeID string, windowSec int64) ([]NetworkTotals, error) {
+	if windowSec <= 0 {
+		windowSec = 3600
+	}
+	if windowSec > 7*24*3600 {
+		windowSec = 7 * 24 * 3600
+	}
+	now := time.Now().Unix()
+	from := now - windowSec
+
+	rows, err := p.db.Query(`
+		SELECT iface,
+		       MAX(ts) AS latest_ts,
+		       SUM(CASE WHEN ts >= ? THEN 1 ELSE 0 END) AS sample_count,
+		       AVG(rx_bytes) AS avg_rx_bytes,
+		       AVG(tx_bytes) AS avg_tx_bytes,
+		       AVG(rx_packets) AS avg_rx_packets,
+		       AVG(tx_packets) AS avg_tx_packets,
+		       AVG(rx_errors) AS avg_rx_errors,
+		       AVG(tx_errors) AS avg_tx_errors,
+		       AVG(rx_drops) AS avg_rx_drops,
+		       AVG(tx_drops) AS avg_tx_drops
+		  FROM (
+		    SELECT iface, ts, rx_bytes, tx_bytes, rx_packets, tx_packets,
+		           rx_errors, tx_errors, rx_drops, tx_drops
+		      FROM network_samples
+		     WHERE node_id = ? AND ts >= ?
+		  )
+		 GROUP BY iface
+		 ORDER BY iface ASC`,
+		from, nodeID, from,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type bucket struct {
+		latestTs int64
+		count    int64
+		avgRxB   float64
+		avgTxB   float64
+		avgRxP   float64
+		avgTxP   float64
+		avgRxE   float64
+		avgTxE   float64
+		avgRxD   float64
+		avgTxD   float64
+	}
+	buckets := map[string]*bucket{}
+
+	for rows.Next() {
+		var iface string
+		b := &bucket{}
+		if err := rows.Scan(&iface, &b.latestTs, &b.count,
+			&b.avgRxB, &b.avgTxB, &b.avgRxP, &b.avgTxP,
+			&b.avgRxE, &b.avgTxE, &b.avgRxD, &b.avgTxD); err != nil {
+			continue
+		}
+		buckets[iface] = b
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]NetworkTotals, 0, len(buckets))
+	for iface, b := range buckets {
+		// Pull the latest counters from the most recent sample so the UI
+		// can render monotonic totals without recomputing deltas.
+		var t NetworkTotals
+		t.Iface = iface
+		t.LatestTs = b.latestTs
+		if err := p.db.QueryRow(
+			`SELECT rx_bytes, tx_bytes, rx_packets, tx_packets,
+			        rx_errors, tx_errors, rx_drops, tx_drops
+			   FROM network_samples
+			  WHERE node_id = ? AND iface = ?
+			  ORDER BY ts DESC LIMIT 1`,
+			nodeID, iface,
+		).Scan(&t.RxBytes, &t.TxBytes, &t.RxPackets, &t.TxPackets,
+			&t.RxErrors, &t.TxErrors, &t.RxDrops, &t.TxDrops); err != nil {
+			continue
+		}
+		// Translate the bucket-averaged counters into per-second rates
+		// only when the bucket spans at least one sample. The window
+		// itself is the denominator for counters that look like
+		// running totals; we approximate by (window / sample_count)
+		// when the agent has been chatty, or fall back to the literal
+		// window when only one observation exists.
+		denom := float64(windowSec)
+		if b.count > 1 {
+			denom = float64(windowSec) / float64(b.count)
+		}
+		if denom > 0 {
+			t.RxBytesPerSec = b.avgRxB / denom
+			t.TxBytesPerSec = b.avgTxB / denom
+			t.RxPacketsPerSec = b.avgRxP / denom
+			t.TxPacketsPerSec = b.avgTxP / denom
+			t.RxErrorsPerSec = b.avgRxE / denom
+			t.TxErrorsPerSec = b.avgTxE / denom
+			t.RxDropsPerSec = b.avgRxD / denom
+			t.TxDropsPerSec = b.avgTxD / denom
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+// NetworkSeriesPoint is one bucket of an interface's traffic over time.
+type NetworkSeriesPoint struct {
+	Timestamp       int64   `json:"ts"`
+	RxBytesPerSec   float64 `json:"rx_bps"`
+	TxBytesPerSec   float64 `json:"tx_bps"`
+	RxPacketsPerSec float64 `json:"rx_pps"`
+	TxPacketsPerSec float64 `json:"tx_pps"`
+	RxErrorsPerSec  float64 `json:"rx_errps"`
+	TxErrorsPerSec  float64 `json:"tx_errps"`
+	RxDropsPerSec   float64 `json:"rx_dropps"`
+	TxDropsPerSec   float64 `json:"tx_dropps"`
+	SampleCount     int     `json:"n"`
+}
+
+// NetworkSeries returns per-bucket per-second rates for one interface on
+// one node. The bucket size is 1 minute for ranges ≤24h and 30 minutes for
+// the 7-day view to keep payloads bounded.
+func (p *PersistentStore) NetworkSeries(nodeID, iface, rangeKey string) ([]NetworkSeriesPoint, error) {
+	if nodeID == "" || iface == "" {
+		return nil, nil
+	}
+	now := time.Now().Unix()
+	var window int64
+	switch rangeKey {
+	case "1h":
+		window = 3600
+	case "6h":
+		window = 6 * 3600
+	case "24h":
+		window = 24 * 3600
+	case "7d":
+		window = 7 * 24 * 3600
+	default:
+		window = 3600
+		rangeKey = "1h"
+	}
+	bucket := int64(60)
+	if window > 24*3600 {
+		bucket = 30 * 60
+	}
+
+	rows, err := p.db.Query(`
+		SELECT (ts / ?) * ? AS bucket_ts,
+		       MIN(rx_bytes), MAX(rx_bytes),
+		       MIN(tx_bytes), MAX(tx_bytes),
+		       MIN(rx_packets), MAX(rx_packets),
+		       MIN(tx_packets), MAX(tx_packets),
+		       MIN(rx_errors), MAX(rx_errors),
+		       MIN(tx_drops), MAX(rx_drops),
+		       COUNT(*)
+		  FROM network_samples
+		 WHERE node_id = ? AND iface = ? AND ts >= ? AND ts <= ?
+		 GROUP BY bucket_ts
+		 ORDER BY bucket_ts ASC`,
+		bucket, bucket, nodeID, iface, now-window, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]NetworkSeriesPoint, 0, 64)
+	for rows.Next() {
+		var p NetworkSeriesPoint
+		var minRxB, maxRxB, minTxB, maxTxB sql.NullFloat64
+		var minRxP, maxRxP, minTxP, maxTxP sql.NullFloat64
+		var minRxE, maxRxE, minRxD, maxRxD sql.NullFloat64
+		if err := rows.Scan(&p.Timestamp,
+			&minRxB, &maxRxB, &minTxB, &maxTxB,
+			&minRxP, &maxRxP, &minTxP, &maxTxP,
+			&minRxE, &maxRxE, &minRxD, &maxRxD,
+			&p.SampleCount); err != nil {
+			continue
+		}
+		secs := float64(bucket)
+		if secs > 0 {
+			p.RxBytesPerSec = (maxRxB.Float64 - minRxB.Float64) / secs
+			p.TxBytesPerSec = (maxTxB.Float64 - minTxB.Float64) / secs
+			p.RxPacketsPerSec = (maxRxP.Float64 - minRxP.Float64) / secs
+			p.TxPacketsPerSec = (maxTxP.Float64 - minTxP.Float64) / secs
+			p.RxErrorsPerSec = (maxRxE.Float64 - minRxE.Float64) / secs
+			p.RxDropsPerSec = (maxRxD.Float64 - minRxD.Float64) / secs
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 func splitKey(key string, idx int) string {

@@ -309,6 +309,82 @@ func main() {
 		json.NewEncoder(w).Encode(out)
 	})
 
+	mux.HandleFunc("GET /api/v1/nodes/{nodeID}/network", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			uid = 1
+		}
+		nodeID := r.PathValue("nodeID")
+		if nodeID == "" {
+			http.Error(w, `{"error":"node_id required"}`, http.StatusBadRequest)
+			return
+		}
+		owns := pStore.GetUserNodes(uid)
+		if _, ok := owns[nodeID]; !ok {
+			http.Error(w, `{"error":"node not in your fleet"}`, http.StatusForbidden)
+			return
+		}
+		rangeKey := r.URL.Query().Get("range")
+		var windowSec int64 = 3600
+		switch rangeKey {
+		case "1h":
+			windowSec = 3600
+		case "6h":
+			windowSec = 6 * 3600
+		case "24h":
+			windowSec = 24 * 3600
+		case "7d":
+			windowSec = 7 * 24 * 3600
+		default:
+			rangeKey = "1h"
+		}
+		totals, err := pStore.NetworkSummary(nodeID, windowSec)
+		if err != nil {
+			http.Error(w, `{"error":"network query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"node_id": nodeID,
+			"range":   rangeKey,
+			"ifaces":  totals,
+		})
+	})
+
+	mux.HandleFunc("GET /api/v1/nodes/{nodeID}/network/series", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			uid = 1
+		}
+		nodeID := r.PathValue("nodeID")
+		iface := r.URL.Query().Get("iface")
+		if nodeID == "" || iface == "" {
+			http.Error(w, `{"error":"node_id and iface required"}`, http.StatusBadRequest)
+			return
+		}
+		owns := pStore.GetUserNodes(uid)
+		if _, ok := owns[nodeID]; !ok {
+			http.Error(w, `{"error":"node not in your fleet"}`, http.StatusForbidden)
+			return
+		}
+		rangeKey := r.URL.Query().Get("range")
+		if rangeKey == "" {
+			rangeKey = "1h"
+		}
+		points, err := pStore.NetworkSeries(nodeID, iface, rangeKey)
+		if err != nil {
+			http.Error(w, `{"error":"series query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"node_id": nodeID,
+			"iface":   iface,
+			"range":   rangeKey,
+			"points":  points,
+		})
+	})
+
 	// 5. Settings API
 	mux.HandleFunc("GET /api/v1/settings", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, err := getUser(r)
