@@ -166,6 +166,17 @@
         </div>
 
         <div class="card">
+            <div class="card-title">
+                <span>Synthetic HTTP probes</span>
+                <span id="probes-count" style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-secondary);">--</span>
+            </div>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 12px;">Агенты NodePulse периодически опрашивают внешние эндпоинты и публикуют uptime / latency (24ч).</p>
+            <div id="probes-list">
+                <p style="color: var(--text-secondary); font-size: 0.9rem;">Нет активных пробов.</p>
+            </div>
+        </div>
+
+        <div class="card">
             <div class="card-title">Текущие инциденты</div>
             <div id="incidents-list">
                 <p style="color: var(--text-secondary); font-size: 0.9rem;">Инциденты отсутствуют. Все системы работают в штатном режиме.</p>
@@ -241,6 +252,49 @@
                     }).join('');
                 } else {
                     uList.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.85rem;">Статистика uptime накапливается — данные появятся после первых суток работы.</p>';
+                }
+
+                const pList = document.getElementById('probes-list');
+                const pCount = document.getElementById('probes-count');
+                try {
+                    const pRes = await fetch('/api/v1/public/probes?window=86400');
+                    if (pRes.ok) {
+                        const pData = await pRes.json();
+                        pCount.innerText = `${pData.count} target${pData.count === 1 ? '' : 's'}`;
+                        if (pData.items && pData.items.length > 0) {
+                            pList.innerHTML = pData.items.map(p => {
+                                const pct = (p.uptime_pct || 0).toFixed(2);
+                                const barColor = p.uptime_pct >= 99.5 ? 'var(--accent-green)' :
+                                                 p.uptime_pct >= 99.0 ? 'var(--accent-yellow)' :
+                                                 'var(--accent-red)';
+                                const ok = p.last_ok;
+                                const lastStatus = p.last_status === 0 ? '—' : p.last_status;
+                                const url = p.url.replace(/^https?:\/\//, '');
+                                const lastAgo = p.last_ts ? Math.max(0, Math.floor((Date.now()/1000 - p.last_ts) / 60)) : null;
+                                const agoTxt = lastAgo === null ? '' : lastAgo < 1 ? '<1m' : lastAgo < 60 ? `${lastAgo}m` : `${Math.floor(lastAgo/60)}h`;
+                                return `
+                                <div class="service-row">
+                                    <div style="min-width: 0; flex: 1;">
+                                        <strong style="font-family: var(--font-mono); font-size: 0.85rem; word-break: break-all;">${url}</strong>
+                                        <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 4px; font-family: var(--font-mono);">
+                                            p50 ${p.latency_p50_ms}ms · p95 ${p.latency_p95_ms}ms · ${p.ok}/${p.total} ok${agoTxt ? ' · ' + agoTxt + ' ago' : ''}
+                                        </div>
+                                    </div>
+                                    <div style="display: flex; align-items: center; gap: 10px; flex-shrink: 0;">
+                                        <span class="pill" style="background: rgba(139, 148, 158, 0.15); color: var(--text-secondary); min-width: 38px; text-align: center;">${lastStatus}</span>
+                                        <div style="width: 80px; height: 8px; background: var(--bg-base); border-radius: 4px; overflow: hidden;">
+                                            <div style="width: ${Math.max(0, Math.min(100, p.uptime_pct))}%; height: 100%; background: ${barColor};"></div>
+                                        </div>
+                                        <span class="pill ${ok ? 'pill-active' : 'pill-down'}" style="min-width: 56px; text-align: center;">${pct}%</span>
+                                    </div>
+                                </div>`;
+                            }).join('');
+                        } else {
+                            pList.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.9rem;">Нет активных пробов — агенты пока не отправили данные.</p>';
+                        }
+                    }
+                } catch (e) {
+                    console.error('probes fetch failed', e);
                 }
 
                 const iList = document.getElementById('incidents-list');
