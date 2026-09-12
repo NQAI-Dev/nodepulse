@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"strconv"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -218,8 +219,41 @@ func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string)
 	if err == nil && exists == 0 {
 		p.db.Exec("INSERT INTO incidents (node_id, severity, title, detail, started_at, resolved) VALUES (?, ?, ?, ?, ?, 0)",
 			nodeID, severity, title, detail, time.Now().Unix())
-		if p.alerter != nil {
-			go p.alerter.NotifyIncident(nodeID, severity, title, detail)
+		ownerID, _ := p.GetNodeOwner(nodeID)
+		settings, _ := p.GetSettings(ownerID)
+		shouldNotify := true
+		if settings != nil {
+			if severity == "critical" && !settings.NotifyCritical {
+				shouldNotify = false
+			}
+			if severity == "warning" && !settings.NotifyWarning {
+				shouldNotify = false
+			}
+		}
+		if shouldNotify {
+			if p.alerter != nil {
+				tgChat := p.alerter.GetChatID()
+				if settings != nil && settings.TelegramChatID != "" {
+					if parsed, err := strconv.ParseInt(settings.TelegramChatID, 10, 64); err == nil && parsed != 0 {
+						tgChat = parsed
+					}
+				}
+				go p.alerter.NotifyIncidentTo(tgChat, nodeID, severity, title, detail)
+			}
+			if settings != nil && settings.WebhookURL != "" && p.webhook != nil {
+				whEvent := protocol.WebhookAlert{
+					Event: "incident.created",
+					Timestamp: time.Now().Unix(),
+					Incident: &protocol.Incident{
+						NodeID: nodeID,
+						Severity: severity,
+						Title: title,
+						Detail: detail,
+						StartedAt: time.Now().Unix(),
+					},
+				}
+				go p.webhook.Dispatch(settings.WebhookURL, whEvent)
+			}
 		}
 	}
 }

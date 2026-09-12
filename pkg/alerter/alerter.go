@@ -24,7 +24,11 @@ func New(botToken string, chatID int64) *Dispatcher {
 }
 
 func (d *Dispatcher) NotifyIncident(nodeID, severity, title, detail string) {
-	if d.botToken == "" || d.chatID == 0 {
+	d.NotifyIncidentTo(d.chatID, nodeID, severity, title, detail)
+}
+
+func (d *Dispatcher) NotifyIncidentTo(chatID int64, nodeID, severity, title, detail string) {
+	if d.botToken == "" || chatID == 0 {
 		return
 	}
 
@@ -42,7 +46,7 @@ func (d *Dispatcher) NotifyIncident(nodeID, severity, title, detail string) {
 		icon, nodeID, severity, title, detail, time.Now().Format("2006-01-02 15:04:05 UTC"))
 
 	payload, _ := json.Marshal(map[string]interface{}{
-		"chat_id":    d.chatID,
+		"chat_id":    chatID,
 		"text":       text,
 		"parse_mode": "HTML",
 	})
@@ -54,4 +58,8 @@ func (d *Dispatcher) NotifyIncident(nodeID, severity, title, detail string) {
 		return
 	}
 	defer resp.Body.Close()
+}
+
+func (d *Dispatcher) GetChatID() int64 {
+	return d.chatID
 }
