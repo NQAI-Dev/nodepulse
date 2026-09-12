@@ -150,8 +150,22 @@ func (p *PersistentStore) IsNodeSilenced(userID int64, nodeID string, now int64)
 		now = time.Now().Unix()
 	}
 
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.isNodeSilencedLocked(userID, nodeID, now)
+}
+
+// isNodeSilencedLocked is the same lookup without taking the mutex —
+// callers that already hold p.mu (notably notifyAfterCreate which runs
+// under CreateIncident's lock) MUST use this variant or they will
+// deadlock against themselves.
+func (p *PersistentStore) isNodeSilencedLocked(userID int64, nodeID string, now int64) (bool, error) {
+	if userID <= 0 {
+		return false, nil
+	}
+	if now == 0 {
+		now = time.Now().Unix()
+	}
 
 	rows, err := p.db.Query(`SELECT scope, node_ids FROM maintenance_windows
 		WHERE user_id = ? AND start_unix <= ? AND (end_unix = 0 OR end_unix > ?)`,

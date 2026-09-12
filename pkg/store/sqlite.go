@@ -460,7 +460,9 @@ func (p *PersistentStore) notifyAfterCreate(incidentID, nodeID, severity, title,
 	// owner/node suppresses the outbound notification but the incident row
 	// is still recorded (for post-mortem queries). The dispatchers below
 	// are skipped entirely; webhook + Telegram never see the event.
-	if silenced, _ := p.IsNodeSilenced(ownerID, nodeID, ts); silenced {
+	// NOTE: must use the *_Locked variant — CreateIncident already holds
+	// p.mu when it calls us, so taking the lock again would deadlock.
+	if silenced, _ := p.isNodeSilencedLocked(ownerID, nodeID, ts); silenced {
 		return
 	}
 

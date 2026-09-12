@@ -512,6 +512,70 @@ func main() {
 		w.Write([]byte(`{"success":true}` + "\n"))
 	})
 
+	mux.HandleFunc("POST /api/v1/maintenance", func(w http.ResponseWriter, r *http.Request) {
+		uid, uname, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		var req protocol.MaintenanceWindowRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid maintenance payload"}`, http.StatusBadRequest)
+			return
+		}
+		win, err := pStore.CreateMaintenanceWindow(uid, req, uname)
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(win)
+	})
+
+	mux.HandleFunc("GET /api/v1/maintenance", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		activeOnly := r.URL.Query().Get("active") == "true"
+		wins, err := pStore.ListMaintenanceWindows(uid, activeOnly)
+		if err != nil {
+			http.Error(w, `{"error":"failed to list windows"}`, http.StatusInternalServerError)
+			return
+		}
+		if wins == nil {
+			wins = []protocol.MaintenanceWindow{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(wins)
+	})
+
+	mux.HandleFunc("DELETE /api/v1/maintenance/{id}", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		idStr := r.PathValue("id")
+		id, perr := strconv.ParseInt(idStr, 10, 64)
+		if perr != nil {
+			http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
+			return
+		}
+		deleted, err := pStore.DeleteMaintenanceWindow(uid, id)
+		if err != nil {
+			http.Error(w, `{"error":"delete failure"}`, http.StatusInternalServerError)
+			return
+		}
+		if deleted == 0 {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":true}` + "\n"))
+	})
+
 	mux.HandleFunc("GET /api/v1/incidents/history", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, err := getUser(r)
 		if err != nil {
