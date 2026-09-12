@@ -183,6 +183,148 @@ func (p *PersistentStore) AllNodesUptime(days int) ([]UptimeSummary, error) {
 	return out, rows.Err()
 }
 
+// UptimeDayBucket is one UTC day's rollup row for a single node. Emitted as
+// part of the per-node uptime drill-down so the status widget can render a
+// bar-chart of daily availability without re-aggregating client-side.
+type UptimeDayBucket struct {
+	Day       string  `json:"day"`        // YYYY-MM-DD (UTC)
+	TotalSecs int64   `json:"total_secs"` // seconds observed this day
+	UpSecs    int64   `json:"up_secs"`    // seconds where node was online
+	UptimePct float64 `json:"uptime_pct"` // 0..100; 0 when TotalSecs == 0
+}
+
+// NodeUptimeDaily returns one UptimeDayBucket per UTC day for nodeID over
+// the last `days` days (inclusive of today). Days with no rollup rows are
+// emitted as zero-secs buckets so the widget timeline stays continuous.
+//
+// ponytail: returns up to 90 rows; for a single page render that's fine.
+// If callers ever ask for years of history, pre-aggregate in SQL with a
+// weekly CTE.
+func (p *PersistentStore) NodeUptimeDaily(nodeID string, days int) ([]UptimeDayBucket, error) {
+	if nodeID == "" {
+		return nil, fmt.Errorf("node_id required")
+	}
+	if days < 1 {
+		days = 1
+	}
+	if days > 90 {
+		days = 90
+	}
+
+	today := time.Now().UTC()
+	todayKey := today.Format("2006-01-02")
+	cutoff := today.AddDate(0, 0, -days+1).Format("2006-01-02")
+
+	rows, err := p.db.Query(`
+		SELECT day, total_secs, up_secs
+		  FROM node_uptime_daily
+		 WHERE node_id = ? AND day >= ?
+		 ORDER BY day ASC
+	`, nodeID, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byDay := make(map[string]struct {
+		total, up int64
+	}, days)
+	for rows.Next() {
+		var day string
+		var total, up int64
+		if err := rows.Scan(&day, &total, &up); err != nil {
+			return nil, err
+		}
+		byDay[day] = struct {
+			total, up int64
+		}{total, up}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]UptimeDayBucket, 0, days)
+	for i := 0; i < days; i++ {
+		ts := today.AddDate(0, 0, -days+1+i)
+		key := ts.Format("2006-01-02")
+		b := UptimeDayBucket{Day: key}
+		if v, ok := byDay[key]; ok {
+			b.TotalSecs = v.total
+			b.UpSecs = v.up
+			if b.TotalSecs > 0 {
+				b.UptimePct = float64(b.UpSecs) / float64(b.TotalSecs) * 100.0
+			}
+		}
+		out = append(out, b)
+	}
+	_ = todayKey
+	return out, nil
+}
+
+// FleetUptimeDaily returns the fleet-wide daily rollup: each row aggregates
+// every node's up_secs/total_secs into a single per-day bucket. Days with
+// no activity are emitted as zero-secs buckets. Mirrors NodeUptimeDaily
+// shape so the status widget can plot fleet vs single-node with the same
+// parser.
+func (p *PersistentStore) FleetUptimeDaily(days int) ([]UptimeDayBucket, error) {
+	if days < 1 {
+		days = 1
+	}
+	if days > 90 {
+		days = 90
+	}
+
+	today := time.Now().UTC()
+	todayKey := today.Format("2006-01-02")
+	cutoff := today.AddDate(0, 0, -days+1).Format("2006-01-02")
+
+	rows, err := p.db.Query(`
+		SELECT day, SUM(total_secs), SUM(up_secs)
+		  FROM node_uptime_daily
+		 WHERE day >= ?
+		 GROUP BY day
+		 ORDER BY day ASC
+	`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byDay := make(map[string]struct {
+		total, up int64
+	}, days)
+	for rows.Next() {
+		var day string
+		var total, up sql.NullInt64
+		if err := rows.Scan(&day, &total, &up); err != nil {
+			return nil, err
+		}
+		byDay[day] = struct {
+			total, up int64
+		}{total.Int64, up.Int64}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]UptimeDayBucket, 0, days)
+	for i := 0; i < days; i++ {
+		ts := today.AddDate(0, 0, -days+1+i)
+		key := ts.Format("2006-01-02")
+		b := UptimeDayBucket{Day: key}
+		if v, ok := byDay[key]; ok {
+			b.TotalSecs = v.total
+			b.UpSecs = v.up
+			if b.TotalSecs > 0 {
+				b.UptimePct = float64(b.UpSecs) / float64(b.TotalSecs) * 100.0
+			}
+		}
+		out = append(out, b)
+	}
+	_ = todayKey
+	return out, nil
+}
+
 // formatUptimePct renders the percentage with a single decimal, suitable for
 // display. 100.00 collapses to 100.0; 99.95 stays distinct.
 func formatUptimePct(pct float64) string {

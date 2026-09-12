@@ -137,3 +137,95 @@ func TestIngestTriggersUptimeRollup(t *testing.T) {
 		t.Errorf("expected non-zero total_secs after Ingest, got %d", summary.TotalSecs)
 	}
 }
+
+func TestNodeUptimeDailyFillsEmptyDays(t *testing.T) {
+	st, err := NewPersistentStore(filepath.Join(t.TempDir(), "daily.db"), "", 0)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	// Pick two consecutive UTC days relative to today so the 3-day window
+	// the helper builds around time.Now() always lands on seeded rows.
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	yesterday := today.AddDate(0, 0, -1)
+
+	// Seed day T-1 (yesterday) and bridge into today so the rollup picks up
+	// at least one bucket on both ends, leaving the middle day empty.
+	if _, err := st.RecordHeartbeat("node-d", yesterday); err != nil {
+		t.Fatalf("seed1: %v", err)
+	}
+	if _, err := st.RecordHeartbeat("node-d", yesterday.Add(10*time.Second)); err != nil {
+		t.Fatalf("seed2: %v", err)
+	}
+	// big gap so the day between yesterday and today is unobserved; the
+	// heartbeat on today restarts the credit window.
+	if _, err := st.RecordHeartbeat("node-d", today.Add(24*time.Hour).Add(-5*time.Second)); err != nil {
+		t.Fatalf("seed3: %v", err)
+	}
+	if _, err := st.RecordHeartbeat("node-d", today.Add(24*time.Hour)); err != nil {
+		t.Fatalf("seed4: %v", err)
+	}
+
+	rows, err := st.NodeUptimeDaily("node-d", 3)
+	if err != nil {
+		t.Fatalf("NodeUptimeDaily: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 daily buckets, got %d", len(rows))
+	}
+
+	days := map[string]UptimeDayBucket{}
+	for _, r := range rows {
+		days[r.Day] = r
+	}
+	wantKeys := []string{
+		today.AddDate(0, 0, -2).Format("2006-01-02"),
+		yesterday.Format("2006-01-02"),
+		today.Format("2006-01-02"),
+	}
+	for _, k := range wantKeys {
+		if _, ok := days[k]; !ok {
+			t.Errorf("missing day %s in daily buckets", k)
+		}
+	}
+	if got := days[yesterday.Format("2006-01-02")]; got.TotalSecs != 10 {
+		t.Errorf("yesterday should hold 10s credit, got total=%d up=%d", got.TotalSecs, got.UpSecs)
+	}
+}
+
+func TestNodeUptimeDailyRejectsEmptyNode(t *testing.T) {
+	st, err := NewPersistentStore(filepath.Join(t.TempDir(), "daily2.db"), "", 0)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if _, err := st.NodeUptimeDaily("", 7); err == nil {
+		t.Fatal("expected error for empty node id")
+	}
+}
+
+func TestFleetUptimeDailyAggregatesAcrossNodes(t *testing.T) {
+	st, err := NewPersistentStore(filepath.Join(t.TempDir(), "fleet.db"), "", 0)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	for _, id := range []string{"alpha", "beta"} {
+		st.RecordHeartbeat(id, now)
+		st.RecordHeartbeat(id, now.Add(time.Second)) // 1s credit each
+	}
+
+	rows, err := st.FleetUptimeDaily(1)
+	if err != nil {
+		t.Fatalf("FleetUptimeDaily: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 bucket, got %d", len(rows))
+	}
+	if rows[0].UpSecs != 2 {
+		t.Errorf("expected 2s fleet up, got %d", rows[0].UpSecs)
+	}
+	if rows[0].UptimePct < 99.9 {
+		t.Errorf("expected ~100%% fleet pct, got %.2f", rows[0].UptimePct)
+	}
+}

@@ -46,6 +46,26 @@ type PublicNode struct {
 	UpdatedAt int64    `json:"updated_at"`
 }
 
+// PublicUptimeRow is one UTC day in the public uptime drill-down. Matches
+// store.UptimeDayBucket so the JSON shape is identical for fleet vs per-node
+// endpoints — widgets can render either with the same parser.
+type PublicUptimeRow struct {
+	Day       string  `json:"day"`        // YYYY-MM-DD (UTC)
+	TotalSecs int64   `json:"total_secs"` // seconds observed this day
+	UpSecs    int64   `json:"up_secs"`    // seconds where node was online
+	UptimePct float64 `json:"uptime_pct"` // 0..100; 0 when TotalSecs == 0
+}
+
+// PublicUptimeSeries is the response for both /public/uptime (fleet-wide)
+// and /public/uptime/{nodeID} (single node). Days is the window length,
+// UpdatedAt is server-side unix seconds for cache headers.
+type PublicUptimeSeries struct {
+	Scope     string           `json:"scope"`     // "fleet" or node_id
+	Days      int              `json:"days"`
+	UpdatedAt int64            `json:"updated_at"`
+	Rows      []PublicUptimeRow `json:"rows"`
+}
+
 // PublicIncidentHistory is one row on the public status timeline.
 // Severity, title, node id, and timestamps only — operator acknowledgements
 // and tenant-scoped data are intentionally excluded.

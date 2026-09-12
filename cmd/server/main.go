@@ -364,6 +364,78 @@ func main() {
 		json.NewEncoder(w).Encode(pStore.PublicIncidentHistogram(days))
 	})
 
+	// Fleet-wide daily uptime drill-down: one row per UTC day with the
+	// aggregated up_secs/total_secs across every reporting node. Powers
+	// the "30-day uptime" bar-chart on the public status page.
+	mux.HandleFunc("GET /api/v1/public/uptime", func(w http.ResponseWriter, r *http.Request) {
+		days := 30
+		if v := r.URL.Query().Get("days"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		rows, err := pStore.FleetUptimeDaily(days)
+		if err != nil {
+			http.Error(w, `{"error":"uptime query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		out := protocol.PublicUptimeSeries{
+			Scope:     "fleet",
+			Days:      days,
+			UpdatedAt: time.Now().Unix(),
+			Rows:      make([]protocol.PublicUptimeRow, 0, len(rows)),
+		}
+		for _, r := range rows {
+			out.Rows = append(out.Rows, protocol.PublicUptimeRow{
+				Day:       r.Day,
+				TotalSecs: r.TotalSecs,
+				UpSecs:    r.UpSecs,
+				UptimePct: r.UptimePct,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		json.NewEncoder(w).Encode(out)
+	})
+
+	// Per-node daily uptime drill-down. Same shape as /public/uptime so
+	// the widget can plot fleet-vs-node side by side with one parser.
+	mux.HandleFunc("GET /api/v1/public/uptime/{nodeID}", func(w http.ResponseWriter, r *http.Request) {
+		nodeID := r.PathValue("nodeID")
+		if nodeID == "" {
+			http.Error(w, `{"error":"node_id required"}`, http.StatusBadRequest)
+			return
+		}
+		days := 30
+		if v := r.URL.Query().Get("days"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		rows, err := pStore.NodeUptimeDaily(nodeID, days)
+		if err != nil {
+			http.Error(w, `{"error":"uptime query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		out := protocol.PublicUptimeSeries{
+			Scope:     nodeID,
+			Days:      days,
+			UpdatedAt: time.Now().Unix(),
+			Rows:      make([]protocol.PublicUptimeRow, 0, len(rows)),
+		}
+		for _, r := range rows {
+			out.Rows = append(out.Rows, protocol.PublicUptimeRow{
+				Day:       r.Day,
+				TotalSecs: r.TotalSecs,
+				UpSecs:    r.UpSecs,
+				UptimePct: r.UptimePct,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		json.NewEncoder(w).Encode(out)
+	})
+
 	mux.HandleFunc("GET /api/v1/nodes", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, err := getUser(r)
 		if err != nil {
