@@ -95,7 +95,14 @@ func main() {
 			log.Printf("Heartbeat delivery failed: %v", err)
 		} else {
 			var hbResp protocol.HeartbeatResponse
-			json.NewDecoder(resp.Body).Decode(&hbResp)
+			if err := json.NewDecoder(resp.Body).Decode(&hbResp); err == nil {
+				for _, cmd := range hbResp.Commands {
+					log.Printf("Executing auto-heal command: %s", cmd)
+					if err := collector.ExecuteCommand(cmd); err != nil {
+						log.Printf("Auto-heal command %s error: %v", cmd, err)
+					}
+				}
+			}
 			resp.Body.Close()
 		}
 
