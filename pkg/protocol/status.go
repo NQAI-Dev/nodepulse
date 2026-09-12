@@ -9,6 +9,7 @@ type PublicStatusPage struct {
 	NodesOnline int                `json:"nodes_online"`
 	Services    []PublicService    `json:"services"`
 	Incidents   []PublicIncident   `json:"recent_incidents"`
+	Uptime      []PublicNodeUptime `json:"uptime"`
 }
 
 type PublicService struct {
@@ -24,4 +25,10 @@ type PublicIncident struct {
 	Title     string `json:"title"`
 	Severity  string `json:"severity"`
 	StartedAt int64  `json:"started_at"`
+}
+
+type PublicNodeUptime struct {
+	NodeID    string  `json:"node_id"`
+	Days      int     `json:"days"`
+	UptimePct float64 `json:"uptime_pct"`
 }

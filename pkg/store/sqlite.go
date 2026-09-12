@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"sync"
 	"strconv"
 	"time"
@@ -21,6 +22,7 @@ type PersistentStore struct {
 	alerter       alerter.Notifier
 	webhook       *alerter.WebhookDispatcher
 	defaultChatID int64 // remembered at construction so we can target the configured chat without asking the Notifier
+	uptime        *uptimeTracker
 }
 
 // SetNotifier swaps the outbound user-facing dispatcher. Used by tests to
@@ -123,12 +125,27 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		}
 	}
 
+	uptimeSchema := `
+	CREATE TABLE IF NOT EXISTS node_uptime_daily (
+		node_id TEXT NOT NULL,
+		day TEXT NOT NULL,
+		total_secs INTEGER NOT NULL DEFAULT 0,
+		up_secs INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (node_id, day)
+	);
+	CREATE INDEX IF NOT EXISTS idx_uptime_day ON node_uptime_daily(day);
+	`
+	if _, err := db.Exec(uptimeSchema); err != nil {
+		return nil, err
+	}
+
 	return &PersistentStore{
 		db:            db,
 		mem:           New(),
 		alerter:       alerter.New(botToken, chatID),
 		webhook:       alerter.NewWebhook(),
 		defaultChatID: chatID,
+		uptime:        newUptimeTracker(),
 	}, nil
 }
 
@@ -237,6 +254,10 @@ func (p *PersistentStore) ValidateToken(token string) bool {
 
 func (p *PersistentStore) Ingest(hb *protocol.Heartbeat) {
 	p.mem.Ingest(hb)
+
+	if _, err := p.RecordHeartbeat(hb.NodeID, time.Now()); err != nil {
+		log.Printf("uptime rollup: %v", err)
+	}
 
 	if hb.Memory.UsedPercent > 92.0 {
 		p.CreateIncident(hb.NodeID, "warning", "High Memory Pressure", fmt.Sprintf("RAM usage at %.1f%%", hb.Memory.UsedPercent))

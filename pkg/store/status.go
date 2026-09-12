@@ -51,6 +51,16 @@ func (p *PersistentStore) GetPublicStatus() protocol.PublicStatusPage {
 		systemStatus = "degraded"
 	}
 
+	uptimeRows, _ := p.AllNodesUptime(30)
+	pubUptime := make([]protocol.PublicNodeUptime, 0, len(uptimeRows))
+	for _, u := range uptimeRows {
+		pubUptime = append(pubUptime, protocol.PublicNodeUptime{
+			NodeID:    u.NodeID,
+			Days:      u.Days,
+			UptimePct: u.UptimePct,
+		})
+	}
+
 	return protocol.PublicStatusPage{
 		Title:           "NodePulse Cloud System Status",
 		Description:     "Real-time operational telemetry and health status of NodePulse monitored infrastructure.",
@@ -60,5 +70,6 @@ func (p *PersistentStore) GetPublicStatus() protocol.PublicStatusPage {
 		NodesOnline:     onlineNodes,
 		Services:        services,
 		Incidents:       pubIncidents,
+		Uptime:          pubUptime,
 	}
 }

@@ -155,6 +155,7 @@
                 <span id="nodes-count" style="font-family: var(--font-mono); font-size: 0.9rem; color: var(--accent-blue);">--/--</span>
             </div>
             <p style="color: var(--text-secondary); font-size: 0.9rem;">Глобальный пул серверов под управлением агентов NodePulse.</p>
+            <div id="uptime-list" style="margin-top: 14px;"></div>
         </div>
 
         <div class="card">
@@ -215,6 +216,31 @@
                     `).join('');
                 } else {
                     sList.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.9rem;">Нет активных контейнеров на мониторинге</p>';
+                }
+
+                const uList = document.getElementById('uptime-list');
+                if (data.uptime && data.uptime.length > 0) {
+                    uList.innerHTML = data.uptime.map(u => {
+                        const pct = (u.uptime_pct || 0).toFixed(1);
+                        const barColor = u.uptime_pct >= 99.5 ? 'var(--accent-green)' :
+                                         u.uptime_pct >= 99.0 ? 'var(--accent-yellow)' :
+                                         'var(--accent-red)';
+                        return `
+                        <div class="service-row">
+                            <div>
+                                <strong style="font-family: var(--font-mono); font-size: 0.9rem;">${u.node_id}</strong>
+                                <span style="color: var(--text-secondary); font-size: 0.75rem; margin-left: 8px;">${u.days}д</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <div style="width: 120px; height: 8px; background: var(--bg-base); border-radius: 4px; overflow: hidden;">
+                                    <div style="width: ${Math.max(0, Math.min(100, u.uptime_pct))}%; height: 100%; background: ${barColor};"></div>
+                                </div>
+                                <span class="pill ${u.uptime_pct >= 99.5 ? 'pill-active' : 'pill-down'}" style="min-width: 60px; text-align: center;">${pct}%</span>
+                            </div>
+                        </div>`;
+                    }).join('');
+                } else {
+                    uList.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.85rem;">Статистика uptime накапливается — данные появятся после первых суток работы.</p>';
                 }
 
                 const iList = document.getElementById('incidents-list');
