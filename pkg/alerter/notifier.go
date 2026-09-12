@@ -13,6 +13,15 @@ type Notifier interface {
 	NotifyResolvedTo(chatID int64, nodeID, severity, title string)
 }
 
+// RichNotifier is an optional extension dispatchers can implement when
+// they support inline-keyboard callbacks. The store type-asserts and falls
+// back to the plain notifier path otherwise. Keeping the method on a
+// separate interface avoids forcing every test double to grow buttons.
+type RichNotifier interface {
+	Notifier
+	NotifyIncidentWithButtonsTo(chatID int64, incidentID, nodeID, severity, title, detail string)
+}
+
 // Compiles-only assertions: the production Dispatcher satisfies Notifier.
 var _ Notifier = (*Dispatcher)(nil)
 
@@ -36,4 +45,10 @@ func (r *RecordingNotifier) NotifyIncidentTo(chatID int64, nodeID, severity, tit
 
 func (r *RecordingNotifier) NotifyResolvedTo(chatID int64, nodeID, severity, title string) {
 	r.Resolves = append(r.Resolves, NotifyCall{ChatID: chatID, NodeID: nodeID, Severity: severity, Title: title})
+}
+
+// NotifyIncidentWithButtonsTo is recorded verbatim on Incidents; tests can
+// tell a plain dispatch from a buttoned one by checking IncidentID != "".
+func (r *RecordingNotifier) NotifyIncidentWithButtonsTo(chatID int64, incidentID, nodeID, severity, title, detail string) {
+	r.Incidents = append(r.Incidents, NotifyCall{ChatID: chatID, NodeID: nodeID, Severity: severity, Title: title, Detail: incidentID + "|" + detail})
 }

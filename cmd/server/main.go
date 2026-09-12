@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NQAI-Dev/nodepulse/pkg/alerter"
 	"github.com/NQAI-Dev/nodepulse/pkg/billing"
 	"github.com/NQAI-Dev/nodepulse/pkg/metrics"
 	"github.com/NQAI-Dev/nodepulse/pkg/protocol"
@@ -51,6 +52,18 @@ func main() {
 		log.Fatalf("Store initialization failure: %v", err)
 	}
 	pStore.InitBillingSchema()
+
+	// Enable HMAC-signed inline-keyboard callback_data. Reuse the bot token
+	// as the shared secret so signing/verification works out of the box;
+	// operators can override with NODEPULSE_TG_CALLBACK_SECRET if they ever
+	// rotate the bot token and don't want old alert buttons to keep working.
+	cbSecret := os.Getenv("NODEPULSE_TG_CALLBACK_SECRET")
+	if cbSecret == "" {
+		cbSecret = token
+	}
+	if disp, ok := pStore.Alerter().(*alerter.Dispatcher); ok && cbSecret != "" {
+		disp.SetCallbackSecret(cbSecret)
+	}
 
 	mux := http.NewServeMux()
 
@@ -438,6 +451,61 @@ func main() {
 		}
 		if err := pStore.ResolveIncident(id); err != nil {
 			http.Error(w, `{"error":"resolve failure"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":true}` + "\n"))
+	})
+
+	// 7. Telegram inline-keyboard callbacks (Acknowledge / Resolve buttons).
+	//
+	// The Telegram Bot API delivers one Update per callback; we only need the
+	// callback_query.data field plus the callback_query.id so we can ACK the
+	// spinner. Signature verification happens against the same secret the
+	// dispatcher used to sign the button data at notification time.
+	mux.HandleFunc("POST /api/v1/telegram/callback", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			CallbackQueryID string `json:"callback_query_id"`
+			Data            string `json:"data"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Data == "" {
+			http.Error(w, `{"error":"invalid callback payload"}`, http.StatusBadRequest)
+			return
+		}
+
+		disp, _ := pStore.Alerter().(*alerter.Dispatcher)
+		if disp == nil {
+			http.Error(w, `{"error":"telegram dispatcher not configured"}`, http.StatusServiceUnavailable)
+			return
+		}
+		action, incidentID, ok := alerter.VerifyCallbackData(disp.CallbackSecret(), req.Data)
+		if !ok {
+			http.Error(w, `{"error":"invalid or unsigned callback"}`, http.StatusForbidden)
+			return
+		}
+
+		switch action {
+		case "ack":
+			acked, err := pStore.AcknowledgeIncident(incidentID)
+			if err != nil {
+				http.Error(w, `{"error":"ack failure"}`, http.StatusInternalServerError)
+				return
+			}
+			if acked {
+				disp.AnswerCallback(req.CallbackQueryID, "✅ Acknowledged")
+			} else {
+				disp.AnswerCallback(req.CallbackQueryID, "⚠️ Already resolved or not found")
+			}
+			log.Printf("[tg-callback] ack incident=%s acked=%v", incidentID, acked)
+		case "resolve":
+			if err := pStore.ResolveIncident(incidentID); err != nil {
+				http.Error(w, `{"error":"resolve failure"}`, http.StatusInternalServerError)
+				return
+			}
+			disp.AnswerCallback(req.CallbackQueryID, "🛠 Resolved")
+			log.Printf("[tg-callback] resolve incident=%s", incidentID)
+		default:
+			http.Error(w, `{"error":"unknown action"}`, http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

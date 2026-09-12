@@ -87,7 +87,10 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		title TEXT NOT NULL,
 		detail TEXT,
 		started_at INTEGER NOT NULL,
-		resolved INTEGER DEFAULT 0
+		resolved INTEGER DEFAULT 0,
+		resolved_at INTEGER DEFAULT 0,
+		last_notified_at INTEGER DEFAULT 0,
+		acknowledged_at INTEGER DEFAULT 0
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_incidents_node ON incidents(node_id, resolved);
@@ -111,6 +114,7 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	// that indicate the column already exists).
 	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN last_notified_at INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN resolved_at INTEGER DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN acknowledged_at INTEGER DEFAULT 0")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_incidents_active ON incidents(node_id, title, resolved)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_incidents_history ON incidents(started_at, resolved)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_autoheal_logs_node_ts ON autoheal_logs(node_id, ts)")
@@ -182,6 +186,11 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 }
 
 func (p *PersistentStore) Webhook() *alerter.WebhookDispatcher { return p.webhook }
+
+// Alerter exposes the outbound user-facing dispatcher so server handlers
+// (Telegram callback routing, future interactive flows) can talk to it
+// without re-plumbing the constructor.
+func (p *PersistentStore) Alerter() alerter.Notifier { return p.alerter }
 
 // DefaultChatID returns the chat the dispatcher was configured with at boot.
 // ponytail: read-only accessor exists so the server can pre-fill settings UI;
@@ -380,12 +389,20 @@ func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string)
 	).Scan(&openID, &lastNotified)
 
 	if err == sql.ErrNoRows {
-		// No open incident: create one and notify.
-		p.db.Exec(
+		// No open incident: create one and notify. Pull the freshly minted
+		// id back out so the dispatcher can attach inline Acknowledge /
+		// Resolve buttons that route back to *this* row.
+		res, ierr := p.db.Exec(
 			"INSERT INTO incidents (node_id, severity, title, detail, started_at, resolved, last_notified_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
 			nodeID, severity, title, detail, nowUnix, nowUnix,
 		)
-		p.notifyAfterCreate(nodeID, severity, title, detail, nowUnix)
+		var incidentID string
+		if ierr == nil {
+			if id, idErr := res.LastInsertId(); idErr == nil {
+				incidentID = fmt.Sprintf("%d", id)
+			}
+		}
+		p.notifyAfterCreate(incidentID, nodeID, severity, title, detail, nowUnix)
 		return
 	}
 	if err != nil {
@@ -398,14 +415,16 @@ func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string)
 
 	if lastNotified == 0 || nowUnix-lastNotified >= int64(cooldownFor(severity).Seconds()) {
 		p.db.Exec("UPDATE incidents SET last_notified_at = ? WHERE id = ?", nowUnix, openID)
-		p.notifyAfterCreate(nodeID, severity, title, detail, nowUnix)
+		p.notifyAfterCreate(fmt.Sprintf("%d", openID), nodeID, severity, title, detail, nowUnix)
 	}
 }
 
 // notifyAfterCreate handles dispatch (Telegram + Webhook) for a freshly created
 // or re-fired incident. The caller decides when this runs (always on insert,
-// and on cooldown expiry for repeated crossings).
-func (p *PersistentStore) notifyAfterCreate(nodeID, severity, title, detail string, ts int64) {
+// and on cooldown expiry for repeated crossings). incidentID is the database
+// row id (base-10); empty string means no inline-keyboard buttons (path
+// stays identical to the pre-buttons behaviour).
+func (p *PersistentStore) notifyAfterCreate(incidentID, nodeID, severity, title, detail string, ts int64) {
 	ownerID, _ := p.GetNodeOwner(nodeID)
 	settings, _ := p.getSettingsLocked(ownerID)
 	if settings == nil {
@@ -429,13 +448,22 @@ func (p *PersistentStore) notifyAfterCreate(nodeID, severity, title, detail stri
 		// uses a 5s-timeout HTTP client, so the worst-case cost per
 		// incident is bounded. Going async here turned the test surface
 		// into a race-condition minefield without buying real parallelism.
-		p.alerter.NotifyIncidentTo(tgChat, nodeID, severity, title, detail)
+		if incidentID != "" {
+			if rich, ok := p.alerter.(alerter.RichNotifier); ok {
+				rich.NotifyIncidentWithButtonsTo(tgChat, incidentID, nodeID, severity, title, detail)
+			} else {
+				p.alerter.NotifyIncidentTo(tgChat, nodeID, severity, title, detail)
+			}
+		} else {
+			p.alerter.NotifyIncidentTo(tgChat, nodeID, severity, title, detail)
+		}
 	}
 	if p.webhook != nil && settings.WebhookURL != "" {
 		whEvent := protocol.WebhookAlert{
 			Event:     "incident.created",
 			Timestamp: ts,
 			Incident: &protocol.Incident{
+				ID:        incidentID,
 				NodeID:    nodeID,
 				Severity:  severity,
 				Title:     title,

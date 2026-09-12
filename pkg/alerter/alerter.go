@@ -10,17 +10,30 @@ import (
 )
 
 type Dispatcher struct {
-	botToken string
-	chatID   int64
-	client   *http.Client
+	botToken   string
+	chatID     int64
+	callbackSecret string // HMAC secret for inline-keyboard callback_data; may be empty (no signing)
+	client     *http.Client
 }
 
 func New(botToken string, chatID int64) *Dispatcher {
 	return &Dispatcher{
-		botToken: botToken,
-		chatID:   chatID,
-		client:   &http.Client{Timeout: 5 * time.Second},
+		botToken:   botToken,
+		chatID:     chatID,
+		client:     &http.Client{Timeout: 5 * time.Second},
 	}
+}
+
+// SetCallbackSecret enables HMAC-signed inline-keyboard callback_data. Pass
+// the bot token (or any other shared secret between dispatcher and the
+// /telegram/callback endpoint) so verifyCallbackData on the server can
+// distinguish operator clicks from forged requests.
+func (d *Dispatcher) SetCallbackSecret(s string) {
+	d.callbackSecret = s
+}
+
+func (d *Dispatcher) CallbackSecret() string {
+	return d.callbackSecret
 }
 
 func (d *Dispatcher) NotifyIncident(nodeID, severity, title, detail string) {
@@ -31,7 +44,22 @@ func (d *Dispatcher) NotifyIncidentTo(chatID int64, nodeID, severity, title, det
 	if d.botToken == "" || chatID == 0 {
 		return
 	}
+	d.sendIncident(chatID, "", nodeID, severity, title, detail)
+}
 
+// NotifyIncidentWithButtonsTo sends the same alert but attaches the
+// Acknowledge / Resolve inline keyboard. incidentID is the database row
+// id (base-10 string) and is required so the callback endpoint can route
+// the operator's click back to the right incident.
+func (d *Dispatcher) NotifyIncidentWithButtonsTo(chatID int64, incidentID, nodeID, severity, title, detail string) {
+	if d.botToken == "" || chatID == 0 || incidentID == "" {
+		d.NotifyIncidentTo(chatID, nodeID, severity, title, detail)
+		return
+	}
+	d.sendIncident(chatID, incidentID, nodeID, severity, title, detail)
+}
+
+func (d *Dispatcher) sendIncident(chatID int64, incidentID, nodeID, severity, title, detail string) {
 	icon := "⚠️"
 	if severity == "critical" {
 		icon = "🚨"
@@ -45,12 +73,23 @@ func (d *Dispatcher) NotifyIncidentTo(chatID int64, nodeID, severity, title, det
 		"<b>Time:</b> %s",
 		icon, nodeID, severity, title, detail, time.Now().Format("2006-01-02 15:04:05 UTC"))
 
-	payload, _ := json.Marshal(map[string]interface{}{
+	body := map[string]interface{}{
 		"chat_id":    chatID,
 		"text":       text,
 		"parse_mode": "HTML",
-	})
+	}
+	if incidentID != "" {
+		rows := BuildIncidentButtons(incidentID, d.callbackSecret)
+		markup, err := EncodeReplyMarkup(rows)
+		if err == nil {
+			var raw interface{}
+			if jsonErr := json.Unmarshal(markup, &raw); jsonErr == nil {
+				body["reply_markup"] = raw
+			}
+		}
+	}
 
+	payload, _ := json.Marshal(body)
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", d.botToken)
 	resp, err := d.client.Post(url, "application/json", bytes.NewReader(payload))
 	if err != nil {
@@ -58,6 +97,29 @@ func (d *Dispatcher) NotifyIncidentTo(chatID int64, nodeID, severity, title, det
 		return
 	}
 	defer resp.Body.Close()
+}
+
+// AnswerCallback answers a callback_query so Telegram stops its "loading"
+// spinner. text is shown as a toast; if empty, a tiny default is used.
+func (d *Dispatcher) AnswerCallback(callbackQueryID, text string) {
+	if d.botToken == "" || callbackQueryID == "" {
+		return
+	}
+	if text == "" {
+		text = "OK"
+	}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"callback_query_id": callbackQueryID,
+		"text":              text,
+		"show_alert":        false,
+	})
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery", d.botToken)
+	resp, err := d.client.Post(url, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("[alerter] Telegram answerCallbackQuery error: %v", err)
+		return
+	}
+	resp.Body.Close()
 }
 
 func (d *Dispatcher) GetChatID() int64 {
