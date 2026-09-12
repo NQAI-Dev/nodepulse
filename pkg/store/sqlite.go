@@ -208,6 +208,10 @@ func (p *PersistentStore) Ingest(hb *protocol.Heartbeat) {
 			p.CreateIncident(hb.NodeID, "critical", "Container Stopped: "+s.Name, s.Status)
 		}
 	}
+
+	// After creating any new incidents, sweep the open ones for this node
+	// and auto-resolve the ones whose condition has cleared.
+	p.ResolveStaleIncidents(hb)
 }
 
 func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string) {
