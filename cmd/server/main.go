@@ -68,6 +68,25 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// Brute-force protection on auth endpoints: 10 attempts per IP per minute
+	// is generous for humans but shuts down scriptable credential stuffing.
+	loginLimiter := store.NewRateLimiter(10, time.Minute)
+	clientKey := func(r *http.Request) string {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			return xff
+		}
+		return r.RemoteAddr
+	}
+	authMw := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !loginLimiter.Allow(clientKey(r)) {
+				http.Error(w, `{"error":"rate limit exceeded — slow down"}`, http.StatusTooManyRequests)
+				return
+			}
+			next(w, r)
+		}
+	}
+
 	getUser := func(r *http.Request) (int64, string, error) {
 		auth := r.Header.Get("Authorization")
 		tok := strings.TrimPrefix(auth, "Bearer ")
@@ -78,7 +97,7 @@ func main() {
 	}
 
 	// 1. Auth endpoints
-	mux.HandleFunc("POST /api/v1/auth/register", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/v1/auth/register", authMw(func(w http.ResponseWriter, r *http.Request) {
 		var req protocol.AuthRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Username) == "" || len(req.Password) < 6 {
 			http.Error(w, `{"error":"username required, password min 6 chars"}`, http.StatusBadRequest)
@@ -89,6 +108,7 @@ func main() {
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusConflict)
 			return
 		}
+		loginLimiter.Reset(clientKey(r))
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(protocol.AuthResponse{
 			Token: tok,
@@ -97,9 +117,9 @@ func main() {
 				Username: req.Username,
 			},
 		})
-	})
+	}))
 
-	mux.HandleFunc("POST /api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/v1/auth/login", authMw(func(w http.ResponseWriter, r *http.Request) {
 		var req protocol.AuthRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
@@ -110,6 +130,7 @@ func main() {
 			http.Error(w, `{"error":"invalid credentials"}`, http.StatusUnauthorized)
 			return
 		}
+		loginLimiter.Reset(clientKey(r))
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(protocol.AuthResponse{
 			Token: tok,
@@ -118,7 +139,7 @@ func main() {
 				Username: req.Username,
 			},
 		})
-	})
+	}))
 
 	// 2. Billing endpoints
 	mux.HandleFunc("POST /api/v1/billing/create-invoice", func(w http.ResponseWriter, r *http.Request) {
