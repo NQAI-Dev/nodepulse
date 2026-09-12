@@ -49,13 +49,17 @@ func (p *PersistentStore) GetPublicFleetSummary() protocol.PublicFleetSummary {
 
 	if summary.NodesTotal > 0 {
 		if rows, err := p.AllNodesUptime(7); err == nil && len(rows) > 0 {
-			var total, weighted float64
+			// Weight by observed seconds, not by UptimePct * Days: the old
+			// formula collapsed to `Days` (always 7) because every row has
+			// the same window — uptime_7d_pct became literally 7 for any
+			// non-zero fleet. Real fleet uptime is up_secs / total_secs.
+			var up, observed int64
 			for _, r := range rows {
-				total += r.UptimePct
-				weighted += r.UptimePct * float64(r.Days)
+				up += r.UpSecs
+				observed += r.TotalSecs
 			}
-			if total > 0 {
-				summary.Uptime7dPct = weighted / total
+			if observed > 0 {
+				summary.Uptime7dPct = float64(up) / float64(observed) * 100.0
 			}
 		}
 	}
