@@ -318,6 +318,18 @@ func main() {
 		})
 	})
 
+	mux.HandleFunc("GET /api/v1/public/incidents/histogram", func(w http.ResponseWriter, r *http.Request) {
+		days := 30
+		if v := r.URL.Query().Get("days"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 90 {
+				days = n
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		json.NewEncoder(w).Encode(pStore.PublicIncidentHistogram(days))
+	})
+
 	mux.HandleFunc("GET /api/v1/nodes", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, err := getUser(r)
 		if err != nil {
