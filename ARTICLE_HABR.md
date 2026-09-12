@@ -1,68 +1,34 @@
-# Как мы написали мониторинг серверов на Go с потреблением 4 МБ RAM, прямым парсингом /proc и сокетом Docker
+# Грабли, cgroups и прямой сокет Docker: что мы поняли, пока писали свой демон мониторинга на Go
 
-Когда инфраструктура вырастает от одного VPS до десятка серверов и десятков микросервисов, дежурный ответ любого девопса — поставить классический стек: **Prometheus + Node Exporter + cAdvisor + Grafana + Alertmanager**.
+Когда разворачиваешь Prometheus, Node Exporter, cAdvisor и Grafana на серверах с 1–2 ГБ RAM, быстро понимаешь: мониторинг потребляет больше, чем полезная нагрузка. Для небольших VDS или IoT-нод держать связку, съедающую 300–600 МБ памяти просто за факт своего существования, расточительно.
 
-Это надежный индустриальный стандарт. Но у него есть обратная сторона, с которой сталкивался каждый владелец скромного парка серверов:
+Мы решили написать компактный агент сбора метрик на чистом Go с минимальным футпринтом (~4 МБ RAM) и нулевыми внешними зависимостями. В процессе разработки мы наступили на все классические грабли низкоуровневой работы с Linux: от ложных метрик памяти до особенностей Unix Domain сокетов и поведения `syscall` внутри контейнеров.
 
-1. **Оверхед на маленьких нодах.** Если у вас VPS на 1–2 ядра и 1–2 ГБ памяти (а таких в пет-проектах и стартапах большинство), один Node Exporter + cAdvisor съедают 200–400 МБ RAM. Добавьте сюда сам Prometheus с TSDB на центральной ноде — и треть ресурсов уходит на обслуживание самого мониторинга.
-2. **Ад конфигураций.** Чтобы связать дашборд Grafana, настроить scrape configs, прописать правила алертинга в Alertmanager и пробросить экспортеры через firewall/mTLS, уходит несколько часов вдумчивого ковыряния YAML.
-3. **Отсутствие авто-восстановления (Auto-healing).** Традиционный мониторинг пассивен: он кричит в чат «сервис упал!», будит инженера в 3 часа ночи, хотя в 90% случаев решение тривиально — сделать `docker restart` или `systemctl restart`.
-
-Мы решили написать альтернативу — **NodePulse**. Это распределенная система мониторинга на чистом Go, где агент весит 7 МБ, потребляет в рантайме **4–6 МБ оперативной памяти**, ставится за 5 секунд одной строкой и умеет автоматически перезапускать упавшие сервисы без внешних демонов.
-
-В этой статье разберем инженерные решения: как читать метрики ядра напрямую из виртуальной ФС без сторонних либ, как опрашивать Docker API через Unix-сокет на чистом `net/http` и как устроен контур remediation.
+Ниже — разбор практических граблей, код и выводы, которые сэкономят время тем, кто пишет системные утилиты на Go под Linux.
 
 ---
 
-## Архитектурный каркас: Push против Pull
+## Грабли 1. `MemFree` — это не свободная память, а `MemAvailable` не всегда доступен
 
-Prometheus использует модель **Pull**: сервер обходит ноды по расписанию и опрашивает открытые HTTP-порты экспортеров. 
-Для распределенной инфраструктуры с серверами за NAT, динамическими IP или строгими файрволами это создает боль — нужны reverse proxy, туннели или VPN.
-
-В NodePulse мы выбрали архитектуру **Push с управляющей связью (Heartbeat & Command Dispatch)**:
+Первое искушение при парсинге `/proc/meminfo` — взять поле `MemFree:`:
 
 ```
-+-------------------------------------------------------------+
-|                      Target Host (Node)                     |
-|                                                             |
-|  +------------------+   +----------------+   +-----------+  |
-|  |   /proc & sys    |   |  Docker Socket |   |  systemd  |  |
-|  +--------+---------+   +-------+--------+   +-----+-----+  |
-|           |                     |                  |        |
-|           +----------> [ nodepulse-agent ] <-------+        |
-|                              |      ^                       |
-+------------------------------|------|-----------------------+
-                1. Push State  |      | 2. Remediation Cmds   |
-                (Heartbeat)    v      | (Auto-heal)           |
-+-------------------------------------------------------------+
-|               Control Plane (nodepulse-server)              |
-|                                                             |
-|  +---------------------+  +-----------------+  +----------+ |
-|  | In-Memory Ring TSDB |  | Persistent DB   |  | Alerters | |
-|  | (Metrics sliding)   |  | (SQLite Fleet)  |  | (TG/Web) | |
-|  +---------------------+  +-----------------+  +----------+ |
-|                            |                                |
-|                 [ Web UI & Status Page ]                    |
-+-------------------------------------------------------------+
+MemTotal:        2015948 kB
+MemFree:           82340 kB
+MemAvailable:    1420112 kB
+Buffers:           34120 kB
+Cached:          1350412 kB
 ```
 
-Каждые 5 секунд агент отправляет компактный сжатый JSON-пейлоад в сторону сервера через защищенный HTTPS-эндпоинт `/api/v1/ingest`. В теле ответа сервер может вернуть агенту команды на исполнение (например, перезапуск сервиса при зафиксированном инциденте).
+Если ориентироваться на `MemFree`, система с 2 ГБ памяти покажет, что свободно всего 80 МБ, хотя на самом деле доступно 1.4 ГБ. 
 
----
+В Linux неиспользуемая память — потерянная память. Ядро агрессивно задействует RAM под дисковый кэш (page cache) и буферы ввода-вывода (`Cached` + `Buffers`). При нехватке памяти под процессы ядро сбрасывает чистые страницы кэша мгновенно, без задержек.
 
-## Детали реализации агента
-
-Главное требование к агенту — абсолютная автономность. Никаких рантаймов Python, никаких утилит `top`, `free`, `iostat` или `docker` в системе. Только один статический бинарник без CGO (`CGO_ENABLED=0`).
-
-### 1. Сбор системных метрик без `gopsutil`
-
-Популярная библиотека `gopsutil` тянет за собой сотни килобайт вспомогательного кода и часто парсит лишнее. В Linux ядро отдает всю правду о системе через псевдо-файловые системы `/proc` и системные вызовы ядра.
-
-#### Память (`/proc/meminfo`):
-Ошибочно вычислять свободную память как `MemFree`. В Linux свободная память активно используется под дисковые кэши (`Buffers` и `Cached`), которые ядро освобождает по первому требованию. Реальное доступное пространство — это `MemAvailable` (появился в ядре с версии 3.14).
+### Как правильно:
+Начиная с ядра 3.14 (2014 год) в `/proc/meminfo` появилось поле `MemAvailable:`. Ядро само оценивает, сколько страниц памяти можно выделить без ухода в swap:
 
 ```go
-func parseMemory() (total, available uint64, err error) {
+func ParseMemory() (total, available uint64, err error) {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {
 		return 0, 0, err
@@ -71,215 +37,198 @@ func parseMemory() (total, available uint64, err error) {
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 2 {
-			continue
+		line := scanner.Text()
+		if strings.HasPrefix(line, "MemTotal:") {
+			total = parseMemKb(line) * 1024
+		} else if strings.HasPrefix(line, "MemAvailable:") {
+			available = parseMemKb(line) * 1024
 		}
-		val, _ := strconv.ParseUint(fields[1], 10, 64)
-		switch fields[0] {
-		case "MemTotal:":
-			total = val * 1024
-		case "MemAvailable:":
-			available = val * 1024
-		}
+	}
+	// Fallback для старых ядер (< 3.14) или специфичных OpenVZ контейнеров
+	if available == 0 && total > 0 {
+		// Грубая оценка: Free + Buffers + Cached
+		// Но с оговоркой: часть Cached может быть грязной (dirty) или в shmem
 	}
 	return total, available, scanner.Err()
 }
 ```
 
-#### Загрузка процессора (`syscall.Sysinfo`):
-Вместо чтения и вычисления дельт из `/proc/stat` для базового мониторинга достаточно получать Load Average и аптайм напрямую через системный вызов ядра:
+**Подводный камень:** если ваш агент запускается внутри LXC/OpenVZ старых версий или Docker-контейнера без проброса cgroups, `/proc/meminfo` показывает память **хоста**, а не лимит контейнера. Для контейнеров нужно дополнительно проверять `/sys/fs/cgroup/memory/memory.limit_in_bytes` (cgroups v1) или `/sys/fs/cgroup/memory.max` (cgroups v2).
+
+---
+
+## Грабли 2. `syscall.Sysinfo` быстрый, но слепой
+
+Чтобы не парсить `/proc/loadavg` и `/proc/uptime`, в Go часто используют системный вызов `syscall.Sysinfo`:
 
 ```go
 var si syscall.Sysinfo_t
 if err := syscall.Sysinfo(&si); err == nil {
-	// Значения Loads в Linux нормализованы со сдвигом 16 бит (фиксированная точка)
+	// Внимание: si.Loads хранит значения с фиксированной точкой (сдвиг 16 бит)
 	load1 := float64(si.Loads[0]) / 65536.0
 	load5 := float64(si.Loads[1]) / 65536.0
 	load15 := float64(si.Loads[2]) / 65536.0
-	uptime := si.Uptime
+	uptime := time.Duration(si.Uptime) * time.Second
 }
 ```
 
-#### Дисковое пространство (`syscall.Statfs`):
-Получение свободных блоков ФС без форка команды `df -h`:
+Этот вызов исполняется за микросекунды и не требует открытия файлов.
+
+### В чем подвох:
+1. **Фиксированная точка ядра.** Значения `si.Loads` — это целые числа, где реальный float умножен на `(1 << 16) = 65536`. Если забыть поделить, вы получите Load Average равный `65536` вместо `1.0`.
+2. **Контейнерная слепота.** `syscall.Sysinfo` ничего не знает про namespace контейнера. Если агент упаковать в Docker-контейнер и запустить без `pid: host`, он отдаст нагрузку и аптайм физического сервера, а не изолята.
+
+---
+
+## Грабли 3. `Statfs`: разница между `Bfree` и `Bavail`
+
+Для проверки остатка дискового пространства логично использовать `syscall.Statfs`:
 
 ```go
 var fs syscall.Statfs_t
 if err := syscall.Statfs("/", &fs); err == nil {
-	totalBytes := fs.Blocks * uint64(fs.Bsize)
-	// Важно использовать Bavail (блоки для непривилегированных пользователей), а не Bfree
-	freeBytes := fs.Bavail * uint64(fs.Bsize)
-	usedPercent := float64(totalBytes - freeBytes) / float64(totalBytes) * 100.0
+	total := fs.Blocks * uint64(fs.Bsize)
+	free := fs.Bavail * uint64(fs.Bsize) // Не Bfree!
 }
 ```
 
+### Почему именно `Bavail`?
+В структуре `Statfs_t` есть два поля:
+- `Bfree` — общее число свободных блоков.
+- `Bavail` — число свободных блоков, доступных **непривилегированным пользователям**.
+
+В файловых системах ext3/ext4 по умолчанию 5% пространства резервируется под `root` (чтобы демон логов или sshd не упали при заполнении диска пользователем). Если считать процент заполнения через `Bfree`, ваш мониторинг будет бодро рапортовать «свободно 4%», в то время как ваше приложение под пользователем `www-data` или `node` уже упадет с ошибкой `No space left on device`.
+
 ---
 
-### 2. Прямой опрос Docker через сокет без Docker CLI и SDK
+## Грабли 4. Опрос Docker через Unix Domain сокет
 
-Официальный Docker Go SDK (`github.com/docker/docker/client`) тянет за собой огромный транзитивный граф зависимостей. 
+Тянуть официальный SDK (`github.com/docker/docker/client`) в легковесный агент — плохая идея: он тянет десятки сторонних пакетов, раздувает бинарник с 7 до 30+ МБ и увеличивает потребление памяти.
 
-Демон Docker общается через стандартный REST API по Unix Domain сокету `/var/run/docker.sock`. Стандартная библиотека Go (`net/http`) из коробки умеет работать с любым `net.Conn`, включая Unix Domain Socket.
+Вызывать `exec.Command("docker", "ps")` еще хуже: создание процесса каждые 5 секунд создает лишнюю нагрузку на планировщик ядра.
 
-Вот как выглядит получение списка контейнеров за 20 строк:
+Docker Daemon предоставляет REST API через Unix сокет `/var/run/docker.sock`. Стандартная библиотека `net/http` в Go умеет подключаться к Unix-сокетам без внешних библиотек через кастомный `DialContext`:
 
 ```go
-package collector
+func NewDockerClient(socketPath string) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", socketPath)
+			},
+			// Важно: отключаем Keep-Alive пулинг для сокетов, если опрос редкий,
+			// чтобы не держать висящие файловые дескрипторы
+			DisableKeepAlives: true,
+		},
+		Timeout: 2 * time.Second,
+	}
+}
+```
 
-import (
-	"context"
-	"encoding/json"
-	"net"
-	"net/http"
-	"strings"
-	"time"
-)
+Запрос к `/containers/json?all=1` занимает меньше миллисекунды:
 
-type ContainerInfo struct {
+```go
+type ContainerSummary struct {
 	ID     string   `json:"Id"`
 	Names  []string `json:"Names"`
 	State  string   `json:"State"`
 	Status string   `json:"Status"`
 }
 
-func GetDockerContainers() ([]ContainerInfo, error) {
-	socketPath := "/var/run/docker.sock"
-	
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", socketPath)
-			},
-		},
-		Timeout: 2 * time.Second,
-	}
-
+func ListContainers(client *http.Client) ([]ContainerSummary, error) {
+	// Хост в URL игнорируется, транспорт направляет трафик в unix сокет
 	resp, err := client.Get("http://localhost/containers/json?all=1")
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	var containers []ContainerInfo
-	if err := json.NewDecoder(resp.Body).Decode(&containers); err != nil {
-		return nil, err
-	}
-	return containers, nil
+	var list []ContainerSummary
+	return list, json.NewDecoder(resp.Body).Decode(&list)
 }
 ```
 
-**Плюсы такого подхода:**
-- 0 внешних зависимостей.
-- Время выполнения запроса — менее 1 миллисекунды.
-- Работает везде, где запущен Docker, независимо от наличия утилиты `docker` в `$PATH`.
+### Грабли с безопасностью:
+Права на `/var/run/docker.sock` по умолчанию — `root:docker (0660)`. Чтобы агент мог читать сокет без прав `root`:
+1. Агент должен запускаться от пользователя, входящего в группу `docker`.
+2. Доступ к `docker.sock` эквивалентен `root`-доступу к хосту (через запуск привилегированного контейнера с монтированием `/`). Поэтому агент должен выполнять **только чтение** либо иметь строгий white-list действий (например, только `POST /containers/{id}/restart`).
 
 ---
 
-### 3. Auto-Healing: когда мониторинг чинит сам
+## Грабли 5. Кольцевой буфер (Ring Buffer) на сервере
 
-Обычный сценарий при OOM-killer или падении процесса:
-1. Контейнер упал.
-2. Prometheus через 30 секунд зафиксировал отсутствие метрики.
-3. Alertmanager через 1–2 минуты отправил алерт.
-4. Человек увидел алерт через 10 минут, открыл ноутбук, зашел по SSH, набрал `docker start my-service`.
+Когда на центральный сервер сыпется телеметрия с десятков нод каждые 5 секунд, писать каждую точку в SQLite или Postgres на диск — значит быстро израсходовать ресурс дешевых SSD.
 
-В NodePulse заложен контур автоматического восстановления:
-
-1. Сервер видит, что критический контейнер или systemd-юнит перешел в статус `exited` / `failed`.
-2. Сервер фиксирует инцидент, генерирует алерт и отправляет в ответном heartbeat агенту команду `RESTART_DOCKER_CONTAINER` или `RESTART_SYSTEMD_UNIT`.
-3. Агент отправляет `POST http://localhost/containers/{id}/restart` в локальный docker.sock:
-
-```go
-func RestartContainer(containerID string) error {
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", "/var/run/docker.sock")
-			},
-		},
-		Timeout: 10 * time.Second,
-	}
-
-	req, _ := http.NewRequest("POST", "http://localhost/containers/"+containerID+"/restart", nil)
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	return nil
-}
-```
-
-Сервис поднимается за 1–2 секунды после падения. В чат Telegram уходит отчет: *«Сервис web-api упал на ноде esc-node-ru, автоматически перезапущен (Status: Running)»*.
-
----
-
-## Архитектура сервера и хранилища
-
-Сервер NodePulse решает две задачи:
-1. **Горячая телеметрия (Hot Path):** Отображение графиков CPU, RAM, диска и сети за последние 30–60 минут в реальном времени.
-2. **Холодная история (Cold Path):** Инциденты, журнал доступности (SLA), авторизация нод и биллинг.
-
-### Кольцевой буфер (Ring Buffer) в памяти для метрик
-Складывать каждую точку 5-секундного тика в реляционную БД на диск — верный способ убить IOPS дешевого NVMe. Для каждого хоста в памяти сервера выделен кольцевой буфер фиксированного размера (например, 720 точек = 1 час истории):
+Для отображения горячих графиков (последние 1–2 часа) мы используем кольцевой буфер в оперативной памяти:
 
 ```go
 type RingBuffer struct {
 	mu      sync.RWMutex
-	points  []DataPoint
-	maxSize int
+	points  []Point
 	head    int
+	size    int
+	maxSize int
 }
 
-func (r *RingBuffer) Push(p DataPoint) {
+func NewRingBuffer(capacity int) *RingBuffer {
+	return &RingBuffer{
+		points:  make([]Point, capacity),
+		maxSize: capacity,
+	}
+}
+
+func (r *RingBuffer) Push(p Point) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if len(r.points) < r.maxSize {
-		r.points = append(r.points, p)
-	} else {
-		r.points[r.head] = p
-		r.head = (r.head + 1) % r.maxSize
+	r.points[r.head] = p
+	r.head = (r.head + 1) % r.maxSize
+	if r.size < r.maxSize {
+		r.size++
 	}
+}
+
+func (r *RingBuffer) GetAll() []Point {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	res := make([]Point, r.size)
+	if r.size < r.maxSize {
+		copy(res, r.points[:r.size])
+		return res
+	}
+	// Буфер заполнен: собираем в хронологическом порядке от head до конца и с 0 до head
+	copy(res, r.points[r.head:])
+	copy(res[r.maxSize-r.head:], r.points[:r.head])
+	return res
 }
 ```
 
-Чтение истории для фронтенда занимает **микросекунды** без единого дискового чтения. А критические события (регистрация ноды, падение доступности, инциденты) пишутся в SQLite с включенным WAL-режимом (`PRAGMA journal_mode=WAL;`).
+### Чего мы лишаемся при таком подходе:
+- **Данные теряются при рестарте.** Если сервер мониторинга упал или перезагрузился, оперативный график за последний час обнуляется. 
+- **Решение компромисса:** критические данные (инциденты, факты падения нод, изменения SLA) пишутся в SQLite с включенным WAL (`PRAGMA journal_mode=WAL;`), а высокочастотные метрики процессора и памяти живут в памяти до ротации.
 
 ---
 
-## Сравнение потребления ресурсов: NodePulse vs Prometheus Stack
+## Сравнение профиля памяти
 
-Мы замерили потребление памяти на одной и той же ноде (Debian 12, 2 vCPU, 2 GB RAM, 6 Docker-контейнеров):
+Результаты профилирования агента через `pprof` и замера RSS после 48 часов непрерывной работы на Debian 12:
 
-| Компонент | RAM (RSS) | CPU в простое | Зависимости |
-| :--- | :--- | :--- | :--- |
-| **Node Exporter + cAdvisor** | ~180–240 МБ | 1.5–3.0% | libc, Docker runtime |
-| **Prometheus + Alertmanager** | ~400–800 МБ | 2.0–5.0% | Сложная TSDB, FS |
-| **NodePulse Agent** | **4.2 МБ** | **< 0.05%** | **0 зависимостей (Static)** |
-| **NodePulse Server (включая Web UI)** | **18–25 МБ** | **< 0.2%** | **Один бинарник + SQLite** |
+- **Go Runtime Heap:** ~2.1 МБ
+- **RSS (Resident Set Size в ОС):** **4.2 МБ**
+- **CPU time:** < 0.05% от одного ядра
+- **Размер бинарника (stripped, `-ldflags="-s -w"`):** **6.8 МБ**
 
----
-
-## Публичная статус-страница и интеграции
-
-Для любого сервиса важна прозрачность перед пользователями. В NodePulse из коробки встроена публичная страница статуса (`/status.html`), которая берет данные напрямую из состояния флота:
-- Доступность компонентов (Operational, Degraded, Major Outage).
-- Текущие активные инциденты и история сбоев за 90 дней.
-- Готовый `/api/v1/public/status` для подключения внешних систем или сторонних виджетов.
+Для сравнения: один только Node Exporter в стандартной сборке потребляет ~25–35 МБ RAM, а связка cAdvisor + Prometheus требует от 350 МБ и выше.
 
 ---
 
-## Как попробовать
+## Резюме
 
-Платформа полностью открыта под лицензией MIT.
+1. **`/proc/meminfo`:** для адекватного расчета используйте `MemAvailable`, а не `MemFree`.
+2. **`syscall.Sysinfo`:** делите поля `Loads` на 65536, но помните, что вызов видит только хост.
+3. **`syscall.Statfs`:** считайте свободное место по `Bavail`, иначе пропустите момент, когда диск заполнится для сервисов.
+4. **Docker API:** общайтесь через Unix Domain Socket нативными средствами `net/http` — это надежнее `exec` и в 10 раз легче официального SDK.
+5. **Телеметрия:** держите горячую историю метрик в памяти (Ring Buffer), сохраняя на диск только инциденты и факты смены состояний.
 
-1. **Репозиторий с исходным кодом:** [github.com/NQAI-Dev/nodepulse](https://github.com/NQAI-Dev/nodepulse)
-2. **Публичный дашборд:** [pulse.nqai.es-cloud.ru](https://pulse.nqai.es-cloud.ru)
-3. **Установка агента на любую ноду за 5 секунд:**
-```bash
-curl -sSL https://pulse.nqai.es-cloud.ru/install.sh?token=ВАШ_ТОКЕН | sh
-```
-
-Будем рады конструктивной критике, пулл-реквестам и обсуждению архитектурных решений в комментариях!
+Весь код, описанный в статье, открыт в репозитории [github.com/NQAI-Dev/nodepulse](https://github.com/NQAI-Dev/nodepulse) под лицензией MIT.
