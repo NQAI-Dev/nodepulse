@@ -45,6 +45,7 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		user_id INTEGER PRIMARY KEY,
 		telegram_chat_id TEXT DEFAULT '',
 		webhook_url TEXT DEFAULT '',
+		webhook_secret TEXT DEFAULT '',
 		notify_critical INTEGER DEFAULT 1,
 		notify_warning INTEGER DEFAULT 1,
 		FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -256,7 +257,7 @@ func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string)
 						StartedAt: time.Now().Unix(),
 					},
 				}
-				go p.webhook.Dispatch(settings.WebhookURL, whEvent)
+				go p.webhook.DispatchSigned(settings.WebhookURL, settings.WebhookSecret, whEvent)
 			}
 		}
 	}

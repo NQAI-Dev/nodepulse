@@ -112,6 +112,6 @@ func (p *PersistentStore) markResolvedAndNotify(id int64, nodeID, severity, titl
 				Resolved:  true,
 			},
 		}
-		go p.webhook.Dispatch(settings.WebhookURL, whEvent)
+		go p.webhook.DispatchSigned(settings.WebhookURL, settings.WebhookSecret, whEvent)
 	}
 }

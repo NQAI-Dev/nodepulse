@@ -247,7 +247,7 @@ func main() {
 			http.Error(w, `{"error":"invalid settings payload"}`, http.StatusBadRequest)
 			return
 		}
-		if err := pStore.UpdateSettings(uid, req.TelegramChatID, req.WebhookURL, req.NotifyCritical, req.NotifyWarning); err != nil {
+		if err := pStore.UpdateSettings(uid, req.TelegramChatID, req.WebhookURL, req.WebhookSecret, req.NotifyCritical, req.NotifyWarning); err != nil {
 			http.Error(w, `{"error":"failed to update settings"}`, http.StatusInternalServerError)
 			return
 		}

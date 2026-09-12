@@ -16,8 +16,8 @@ func (p *PersistentStore) getSettingsLocked(userID int64) (*protocol.UserSetting
 	var s protocol.UserSettings
 	var crit, warn int
 	err := p.db.QueryRow(`
-		SELECT telegram_chat_id, webhook_url, notify_critical, notify_warning
-		FROM user_settings WHERE user_id = ?`, userID).Scan(&s.TelegramChatID, &s.WebhookURL, &crit, &warn)
+		SELECT telegram_chat_id, webhook_url, webhook_secret, notify_critical, notify_warning
+		FROM user_settings WHERE user_id = ?`, userID).Scan(&s.TelegramChatID, &s.WebhookURL, &s.WebhookSecret, &crit, &warn)
 	if err == sql.ErrNoRows {
 		return &protocol.UserSettings{
 			NotifyCritical: true,
@@ -32,7 +32,7 @@ func (p *PersistentStore) getSettingsLocked(userID int64) (*protocol.UserSetting
 	return &s, nil
 }
 
-func (p *PersistentStore) UpdateSettings(userID int64, tgChatID, webhookURL string, crit, warn bool) error {
+func (p *PersistentStore) UpdateSettings(userID int64, tgChatID, webhookURL, webhookSecret string, crit, warn bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -46,14 +46,15 @@ func (p *PersistentStore) UpdateSettings(userID int64, tgChatID, webhookURL stri
 	}
 
 	_, err := p.db.Exec(`
-		INSERT INTO user_settings (user_id, telegram_chat_id, webhook_url, notify_critical, notify_warning)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO user_settings (user_id, telegram_chat_id, webhook_url, webhook_secret, notify_critical, notify_warning)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id) DO UPDATE SET
 			telegram_chat_id = excluded.telegram_chat_id,
 			webhook_url = excluded.webhook_url,
+			webhook_secret = excluded.webhook_secret,
 			notify_critical = excluded.notify_critical,
 			notify_warning = excluded.notify_warning`,
-		userID, tgChatID, webhookURL, critInt, warnInt)
+		userID, tgChatID, webhookURL, webhookSecret, critInt, warnInt)
 	return err
 }
 

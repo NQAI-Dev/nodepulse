@@ -19,6 +19,7 @@ type AuthResponse struct {
 type UserSettings struct {
 	TelegramChatID string `json:"telegram_chat_id"`
 	WebhookURL     string `json:"webhook_url"`
+	WebhookSecret  string `json:"webhook_secret,omitempty"`
 	NotifyCritical bool   `json:"notify_critical"`
 	NotifyWarning  bool   `json:"notify_warning"`
 }
