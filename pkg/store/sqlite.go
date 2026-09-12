@@ -23,6 +23,7 @@ type PersistentStore struct {
 	webhook       *alerter.WebhookDispatcher
 	defaultChatID int64 // remembered at construction so we can target the configured chat without asking the Notifier
 	uptime        *uptimeTracker
+	netRates      *networkRateTracker
 }
 
 // SetNotifier swaps the outbound user-facing dispatcher. Used by tests to
@@ -145,6 +146,23 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		disk_pct REAL NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_samples_node_ts ON metric_samples(node_id, ts);
+
+	CREATE TABLE IF NOT EXISTS network_samples (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		node_id TEXT NOT NULL,
+		iface TEXT NOT NULL,
+		ts INTEGER NOT NULL,
+		rx_bytes INTEGER NOT NULL DEFAULT 0,
+		tx_bytes INTEGER NOT NULL DEFAULT 0,
+		rx_packets INTEGER NOT NULL DEFAULT 0,
+		tx_packets INTEGER NOT NULL DEFAULT 0,
+		rx_errors INTEGER NOT NULL DEFAULT 0,
+		tx_errors INTEGER NOT NULL DEFAULT 0,
+		rx_drops INTEGER NOT NULL DEFAULT 0,
+		tx_drops INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE INDEX IF NOT EXISTS idx_network_node_ts ON network_samples(node_id, ts);
+	CREATE INDEX IF NOT EXISTS idx_network_node_iface_ts ON network_samples(node_id, iface, ts);
 	`
 	if _, err := db.Exec(uptimeSchema); err != nil {
 		return nil, err
@@ -157,6 +175,7 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		webhook:       alerter.NewWebhook(),
 		defaultChatID: chatID,
 		uptime:        newUptimeTracker(),
+		netRates:      newNetworkRateTracker(),
 	}, nil
 }
 
@@ -296,6 +315,26 @@ func (p *PersistentStore) Ingest(hb *protocol.Heartbeat) {
 		log.Printf("metrics sample: %v", err)
 	}
 
+	if len(hb.Network) > 0 {
+		samples := make([]NetworkSample, 0, len(hb.Network))
+		for _, n := range hb.Network {
+			samples = append(samples, NetworkSample{
+				Iface:     n.Iface,
+				Timestamp: hb.Timestamp,
+				RxBytes:   n.RxBytes,
+				TxBytes:   n.TxBytes,
+				RxPackets: n.RxPackets,
+				TxPackets: n.TxPackets,
+				RxErrors:  n.RxErrors,
+				TxErrors:  n.TxErrors,
+				RxDrops:   n.RxDrops,
+				TxDrops:   n.TxDrops,
+			})
+		}
+		rates := p.RecordNetworkSamples(hb.NodeID, samples)
+		p.EvaluateNetworkAlerts(hb.NodeID, rates)
+	}
+
 	if hb.Memory.UsedPercent > 92.0 {
 		p.CreateIncident(hb.NodeID, "warning", "High Memory Pressure", fmt.Sprintf("RAM usage at %.1f%%", hb.Memory.UsedPercent))
 	}
@@ -384,7 +423,11 @@ func (p *PersistentStore) notifyAfterCreate(nodeID, severity, title, detail stri
 				tgChat = parsed
 			}
 		}
-		go p.alerter.NotifyIncidentTo(tgChat, nodeID, severity, title, detail)
+		// Fire synchronously: the underlying Telegram dispatcher already
+		// uses a 5s-timeout HTTP client, so the worst-case cost per
+		// incident is bounded. Going async here turned the test surface
+		// into a race-condition minefield without buying real parallelism.
+		p.alerter.NotifyIncidentTo(tgChat, nodeID, severity, title, detail)
 	}
 	if p.webhook != nil && settings.WebhookURL != "" {
 		whEvent := protocol.WebhookAlert{
@@ -398,7 +441,10 @@ func (p *PersistentStore) notifyAfterCreate(nodeID, severity, title, detail stri
 				StartedAt: ts,
 			},
 		}
-		go p.webhook.DispatchSigned(settings.WebhookURL, settings.WebhookSecret, whEvent)
+		// Same rationale as the alerter: webhook dispatcher does its own
+		// retries/backoff with a bounded timeout, so keep the call site
+		// synchronous for predictability.
+		p.webhook.DispatchSigned(settings.WebhookURL, settings.WebhookSecret, whEvent)
 	}
 }
 
