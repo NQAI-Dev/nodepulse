@@ -83,7 +83,7 @@ func TestIncidentResolveAllowsRefire(t *testing.T) {
 	}
 
 	inc := s.GetActiveIncidents(1)[0]
-	if err := s.ResolveIncident(inc.ID); err != nil {
+	if err := s.ResolveIncident(inc.ID, 1); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	if len(s.GetActiveIncidents(1)) != 0 {

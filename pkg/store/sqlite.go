@@ -507,12 +507,44 @@ func (p *PersistentStore) notifyAfterCreate(incidentID, nodeID, severity, title,
 	}
 }
 
-func (p *PersistentStore) ResolveIncident(id string) error {
+// ResolveIncident marks an incident resolved. Returns ErrIncidentNotOwned when
+// the incident exists but the user does not own the underlying node — callers
+// must map that to HTTP 403 instead of a generic 500.
+func (p *PersistentStore) ResolveIncident(id string, userID int64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	_, err := p.db.Exec("UPDATE incidents SET resolved = 1, resolved_at = ? WHERE id = ?", time.Now().Unix(), id)
-	return err
+	res, err := p.db.Exec(`
+		UPDATE incidents
+		   SET resolved = 1, resolved_at = ?
+		 WHERE id = ?
+		   AND (
+		    ? = 1
+		    OR id IN (
+		        SELECT i.id FROM incidents i
+		        JOIN node_owners o ON o.node_id = i.node_id
+		        WHERE o.user_id = ?
+		    )
+		   )`, time.Now().Unix(), id, userID, userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// distinguish missing from forbidden: cheaper than an extra SELECT
+		var exists int
+		_ = p.db.QueryRow("SELECT 1 FROM incidents WHERE id = ?", id).Scan(&exists)
+		if exists == 1 {
+			return ErrIncidentForbidden
+		}
+		return ErrIncidentNotFound
+	}
+	return nil
 }
+
+var (
+	ErrIncidentForbidden = fmt.Errorf("incident does not belong to user")
+	ErrIncidentNotFound  = fmt.Errorf("incident not found")
+)
 
 func (p *PersistentStore) GetActiveIncidents(userID int64) []protocol.Incident {
 	query := "SELECT id, node_id, severity, title, detail, started_at, resolved, acknowledged_at, last_notified_at FROM incidents WHERE resolved = 0 ORDER BY started_at DESC LIMIT 50"

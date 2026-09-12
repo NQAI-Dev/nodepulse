@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -510,17 +511,28 @@ func main() {
 	})
 
 	mux.HandleFunc("POST /api/v1/incidents/resolve", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
 		id := r.URL.Query().Get("id")
 		if id == "" {
 			http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
 			return
 		}
-		if err := pStore.ResolveIncident(id); err != nil {
+		err = pStore.ResolveIncident(id, uid)
+		switch {
+		case err == nil:
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"success":true}` + "\n"))
+		case errors.Is(err, store.ErrIncidentForbidden):
+			http.Error(w, `{"error":"incident does not belong to you"}`, http.StatusForbidden)
+		case errors.Is(err, store.ErrIncidentNotFound):
+			http.Error(w, `{"error":"incident not found"}`, http.StatusNotFound)
+		default:
 			http.Error(w, `{"error":"resolve failure"}`, http.StatusInternalServerError)
-			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"success":true}` + "\n"))
 	})
 
 	// 7. Telegram inline-keyboard callbacks (Acknowledge / Resolve buttons).
@@ -564,7 +576,7 @@ func main() {
 			}
 			log.Printf("[tg-callback] ack incident=%s acked=%v", incidentID, acked)
 		case "resolve":
-			if err := pStore.ResolveIncident(incidentID); err != nil {
+			if err := pStore.ResolveIncident(incidentID, 1); err != nil {
 				http.Error(w, `{"error":"resolve failure"}`, http.StatusInternalServerError)
 				return
 			}

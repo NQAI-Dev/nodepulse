@@ -24,7 +24,7 @@ func TestPublicIncidentHistoryIncludesResolved(t *testing.T) {
 	if len(open) != 1 {
 		t.Fatalf("expected 1 open incident, got %d", len(open))
 	}
-	if err := s.ResolveIncident(open[0].ID); err != nil {
+	if err := s.ResolveIncident(open[0].ID, 1); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 

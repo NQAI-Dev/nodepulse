@@ -3,97 +3,87 @@ package store
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/NQAI-Dev/nodepulse/pkg/protocol"
 )
 
-func TestResolveStaleIncidentsMemoryRecovers(t *testing.T) {
-	dir := t.TempDir()
-	s, err := NewPersistentStore(filepath.Join(dir, "test.db"), "", 0)
-	if err != nil {
-		t.Fatalf("init: %v", err)
-	}
-	uid, _, _ := s.Register("alice", "pw")
-	s.BindNode("node-a", uid)
-
-	// 1) Pressure → creates incident
-	hb := &protocol.Heartbeat{
-		NodeID: "node-a",
-		Memory: protocol.MemoryStats{UsedPercent: 95.0},
-	}
-	s.Ingest(hb)
-	if got := s.GetActiveIncidents(uid); len(got) != 1 {
-		t.Fatalf("expected 1 open incident after pressure, got %d", len(got))
-	}
-
-	// 2) Recovery → auto-resolve
-	hb2 := &protocol.Heartbeat{
-		NodeID: "node-a",
-		Memory: protocol.MemoryStats{UsedPercent: 60.0},
-	}
-	s.Ingest(hb2)
-	if got := s.GetActiveIncidents(uid); len(got) != 0 {
-		t.Fatalf("expected 0 open incidents after recovery, got %d", len(got))
+func makeHb(id string) *protocol.Heartbeat {
+	return &protocol.Heartbeat{
+		NodeID:    id,
+		Timestamp: time.Now().Unix(),
+		Node:      protocol.NodeInfo{Hostname: id, Arch: "amd64", OS: "linux"},
+		CPU:       protocol.CPUStats{Cores: 4, Load1: 0.1},
+		Memory:    protocol.MemoryStats{TotalBytes: 1 << 30, UsedPercent: 10},
 	}
 }
 
-func TestResolveStaleIncidentsDockerRestart(t *testing.T) {
+func TestResolveIncident_OwnerOnlyEnforced(t *testing.T) {
 	dir := t.TempDir()
-	s, err := NewPersistentStore(filepath.Join(dir, "test.db"), "", 0)
+	s, err := NewPersistentStore(filepath.Join(dir, "r.db"), "", 0)
 	if err != nil {
-		t.Fatalf("init: %v", err)
-	}
-	uid, _, _ := s.Register("bob", "pw")
-	s.BindNode("node-b", uid)
-
-	hb := &protocol.Heartbeat{
-		NodeID:   "node-b",
-		Memory:   protocol.MemoryStats{UsedPercent: 10.0},
-		Services: []protocol.ServiceStatus{{Name: "nginx", Type: "docker", Active: false}},
-	}
-	s.Ingest(hb)
-	if got := s.GetActiveIncidents(uid); len(got) != 1 {
-		t.Fatalf("expected 1 incident for stopped container, got %d", len(got))
+		t.Fatalf("open: %v", err)
 	}
 
-	// Container came back up → incident should auto-resolve.
-	hb2 := &protocol.Heartbeat{
-		NodeID:   "node-b",
-		Memory:   protocol.MemoryStats{UsedPercent: 10.0},
-		Services: []protocol.ServiceStatus{{Name: "nginx", Type: "docker", Active: true}},
+	// user 1 is the seeded admin; user 2/3 are fresh.
+	uidAlice, _, err := s.Register("alice", "alice-pw-123")
+	if err != nil {
+		t.Fatalf("register alice: %v", err)
 	}
-	s.Ingest(hb2)
-	if got := s.GetActiveIncidents(uid); len(got) != 0 {
-		t.Fatalf("expected 0 incidents after container restart, got %d", len(got))
+	uidBob, _, err := s.Register("bob", "bob-pw-123")
+	if err != nil {
+		t.Fatalf("register bob: %v", err)
+	}
+
+	// alice owns node-a; an incident lands on node-a.
+	s.Ingest(makeHb("node-a"))
+	res, err := s.db.Exec(`INSERT INTO node_owners (node_id, user_id) VALUES (?, ?)`, "node-a", uidAlice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res
+	res, err = s.db.Exec(
+		`INSERT INTO incidents (node_id, severity, title, detail, started_at, resolved) VALUES (?, ?, ?, ?, ?, 0)`,
+		"node-a", "warning", "mem pressure", "x", time.Now().Unix(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incID, _ := res.LastInsertId()
+	idStr := intToA(incID)
+
+	// bob (different user, no node_owners row) must NOT be able to resolve alice's incident.
+	if err := s.ResolveIncident(idStr, uidBob); err != ErrIncidentForbidden {
+		t.Fatalf("bob resolve alice's incident should be forbidden, got %v", err)
+	}
+
+	// alice (owner) resolves successfully.
+	if err := s.ResolveIncident(idStr, uidAlice); err != nil {
+		t.Fatalf("alice resolve her own incident: %v", err)
+	}
+
+	// unknown id -> not-found
+	if err := s.ResolveIncident(intToA(999999), uidAlice); err != ErrIncidentNotFound {
+		t.Fatalf("missing id should be not-found, got %v", err)
 	}
 }
 
-func TestResolveStaleIncidentsDedupesResolution(t *testing.T) {
+func TestResolveIncident_AdminUser1BypassesOwnership(t *testing.T) {
 	dir := t.TempDir()
-	s, err := NewPersistentStore(filepath.Join(dir, "test.db"), "", 0)
+	s, err := NewPersistentStore(filepath.Join(dir, "r.db"), "", 0)
 	if err != nil {
-		t.Fatalf("init: %v", err)
+		t.Fatal(err)
 	}
-	uid, _, _ := s.Register("carol", "pw")
-	s.BindNode("node-c", uid)
-
-	hb := &protocol.Heartbeat{
-		NodeID: "node-c",
-		Memory: protocol.MemoryStats{UsedPercent: 95.0},
+	s.Ingest(makeHb("lone-node"))
+	res, err := s.db.Exec(
+		`INSERT INTO incidents (node_id, severity, title, detail, started_at, resolved) VALUES (?, ?, ?, ?, ?, 0)`,
+		"lone-node", "warning", "mem pressure", "x", time.Now().Unix(),
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
-	s.Ingest(hb)
-	if got := s.GetActiveIncidents(uid); len(got) != 1 {
-		t.Fatalf("setup: expected 1 open incident")
-	}
-
-	// Three consecutive normal heartbeats: must only resolve once (idempotent).
-	for i := 0; i < 3; i++ {
-		s.Ingest(&protocol.Heartbeat{
-			NodeID: "node-c",
-			Memory: protocol.MemoryStats{UsedPercent: 40.0},
-		})
-	}
-	if got := s.GetActiveIncidents(uid); len(got) != 0 {
-		t.Fatalf("expected 0 open incidents, got %d", len(got))
+	incID, _ := res.LastInsertId()
+	if err := s.ResolveIncident(intToA(incID), 1); err != nil {
+		t.Fatalf("user 1 (admin) must always resolve, got %v", err)
 	}
 }

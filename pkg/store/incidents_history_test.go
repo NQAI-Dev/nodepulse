@@ -145,7 +145,7 @@ func resolveFirst(p *PersistentStore, title string) (string, error) {
 		return "", err
 	}
 	pid := intToA(id)
-	if err := p.ResolveIncident(pid); err != nil {
+	if err := p.ResolveIncident(pid, 1); err != nil {
 		return "", err
 	}
 	return pid, nil

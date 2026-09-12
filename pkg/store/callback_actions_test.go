@@ -38,7 +38,7 @@ func TestAcknowledgeIncident(t *testing.T) {
 	}
 
 	// After resolving, a further ack must be refused.
-	if err := s.ResolveIncident(incs[0].ID); err != nil {
+	if err := s.ResolveIncident(incs[0].ID, 1); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	ok, err = s.AcknowledgeIncident(incs[0].ID)

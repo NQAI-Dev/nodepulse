@@ -39,7 +39,7 @@ func TestPersistentStore(t *testing.T) {
 		t.Fatalf("Expected incident triggered for high memory")
 	}
 
-	err = s.ResolveIncident(incidents[0].ID)
+	err = s.ResolveIncident(incidents[0].ID, 1)
 	if err != nil {
 		t.Fatalf("Failed to resolve incident: %v", err)
 	}
