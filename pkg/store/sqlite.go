@@ -7,6 +7,7 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+	"github.com/NQAI-Dev/nodepulse/pkg/alerter"
 	"github.com/NQAI-Dev/nodepulse/pkg/protocol"
 )
 
@@ -14,9 +15,10 @@ type PersistentStore struct {
 	db      *sql.DB
 	mem     *Store
 	mu      sync.Mutex
+	alerter *alerter.Dispatcher
 }
 
-func NewPersistentStore(dbPath string) (*PersistentStore, error) {
+func NewPersistentStore(dbPath string, botToken string, chatID int64) (*PersistentStore, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
@@ -45,12 +47,12 @@ func NewPersistentStore(dbPath string) (*PersistentStore, error) {
 		return nil, err
 	}
 
-	// Insert default system token if none exists
 	db.Exec("INSERT OR IGNORE INTO api_tokens (token, owner) VALUES ('np_live_master_secret', 'admin')")
 
 	return &PersistentStore{
-		db:  db,
-		mem: New(),
+		db:      db,
+		mem:     New(),
+		alerter: alerter.New(botToken, chatID),
 	}, nil
 }
 
@@ -66,7 +68,6 @@ func (p *PersistentStore) ValidateToken(token string) bool {
 func (p *PersistentStore) Ingest(hb *protocol.Heartbeat) {
 	p.mem.Ingest(hb)
 
-	// Flap / Incident detection: Check if OOM or high load
 	if hb.Memory.UsedPercent > 92.0 {
 		p.CreateIncident(hb.NodeID, "warning", "High Memory Pressure", fmt.Sprintf("RAM usage at %.1f%%", hb.Memory.UsedPercent))
 	}
@@ -86,6 +87,9 @@ func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string)
 	if err == nil && exists == 0 {
 		p.db.Exec("INSERT INTO incidents (node_id, severity, title, detail, started_at, resolved) VALUES (?, ?, ?, ?, ?, 0)",
 			nodeID, severity, title, detail, time.Now().Unix())
+		if p.alerter != nil {
+			go p.alerter.NotifyIncident(nodeID, severity, title, detail)
+		}
 	}
 }
 
