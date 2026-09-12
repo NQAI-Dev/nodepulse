@@ -167,7 +167,7 @@ func main() {
 		})
 	})
 
-	// 3. Ingestion endpoint for agents (validates token & limits)
+	// 3. Ingestion endpoint for agents (validates token, evaluates autoheal & limits)
 	mux.HandleFunc("POST /api/v1/ingest", func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("X-NodePulse-Token")
 		if token == "" {
@@ -195,12 +195,18 @@ func main() {
 		}
 		pStore.Ingest(&hb)
 
+		// Evaluate auto-heal remediation commands
+		commands := pStore.EvaluateAutoHeal(&hb)
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(protocol.HeartbeatResponse{Acknowledged: true})
+		json.NewEncoder(w).Encode(protocol.HeartbeatResponse{
+			Acknowledged: true,
+			Commands:     commands,
+		})
 	})
 
 	// 4. Fleet Nodes API
-		mux.HandleFunc("GET /api/v1/public/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/v1/public/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(pStore.GetPublicStatus())
 	})
