@@ -36,7 +36,7 @@ jobs:
         run: go test -race -count=1 -timeout=120s ./...
 
       - name: Test with coverage
-        run: go test -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -coverprofile=coverage.out -covermode=atomic ./pkg/...
 
       - name: Upload coverage
         if: matrix.go == '1.24' && matrix.os == 'ubuntu-latest'
@@ -55,7 +55,7 @@ jobs:
           go-version: "1.24"
           cache: true
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.5.0
           args: --timeout=5m
