@@ -18,10 +18,18 @@ import (
 func main() {
 	nodeID := flag.String("node", "", "Unique Node ID")
 	serverURL := flag.String("server", "http://127.0.0.1:8080/api/v1/ingest", "NodePulse Central URL")
+	token := flag.String("token", "", "NodePulse Ingest API Token")
 	interval := flag.Duration("interval", 10*time.Second, "Heartbeat interval")
 	unitsFlag := flag.String("units", "", "Comma-separated systemd units to monitor")
 	dryRun := flag.Bool("dry-run", false, "Collect and print without network push")
 	flag.Parse()
+
+	if *token == "" {
+		*token = os.Getenv("NODEPULSE_TOKEN")
+		if *token == "" {
+			*token = "np_live_master_secret"
+		}
+	}
 
 	if *nodeID == "" {
 		*nodeID = os.Getenv("NODEPULSE_NODE_ID")
@@ -71,7 +79,18 @@ func main() {
 			return
 		}
 
-		resp, err := client.Post(*serverURL, "application/json", bytes.NewBuffer(data))
+		req, err := http.NewRequest("POST", *serverURL, bytes.NewBuffer(data))
+		if err != nil {
+			log.Printf("Request creation error: %v", err)
+			time.Sleep(*interval)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if *token != "" {
+			req.Header.Set("X-NodePulse-Token", *token)
+		}
+
+		resp, err := client.Do(req)
 		if err != nil {
 			log.Printf("Heartbeat delivery failed: %v", err)
 		} else {
