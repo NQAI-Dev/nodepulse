@@ -313,6 +313,23 @@ func main() {
 	})
 
 	// 4. Fleet Nodes API
+	// Prometheus scrape endpoint. Unauthenticated on purpose — like the
+	// `/metrics` convention from the reference servers, this assumes the
+	// scraper lives inside the trusted network. If you expose this to the
+	// public internet, gate it behind a reverse-proxy ACL or a bearer
+	// token middleware that scrapers can carry. Cache 10s to avoid
+	// hammering SQLite on a sub-second scrape interval.
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		body, err := pStore.PrometheusMetrics()
+		if err != nil {
+			http.Error(w, "metrics render failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=10")
+		w.Write([]byte(body))
+	})
+
 	mux.HandleFunc("GET /api/v1/public/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(pStore.GetPublicStatus())
