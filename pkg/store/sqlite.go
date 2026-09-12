@@ -110,7 +110,9 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	// We ADD COLUMN last_notified_at if it doesn't exist (ignore errors
 	// that indicate the column already exists).
 	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN last_notified_at INTEGER DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN resolved_at INTEGER DEFAULT 0")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_incidents_active ON incidents(node_id, title, resolved)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_incidents_history ON incidents(started_at, resolved)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_autoheal_logs_node_ts ON autoheal_logs(node_id, ts)")
 
 	// Create admin user if not exists
@@ -451,7 +453,7 @@ func (p *PersistentStore) notifyAfterCreate(nodeID, severity, title, detail stri
 func (p *PersistentStore) ResolveIncident(id string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	_, err := p.db.Exec("UPDATE incidents SET resolved = 1 WHERE id = ?", id)
+	_, err := p.db.Exec("UPDATE incidents SET resolved = 1, resolved_at = ? WHERE id = ?", time.Now().Unix(), id)
 	return err
 }
 

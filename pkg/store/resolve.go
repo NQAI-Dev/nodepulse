@@ -76,7 +76,7 @@ func incidentStillActive(title string, hb *protocol.Heartbeat) bool {
 
 func (p *PersistentStore) markResolvedAndNotify(id int64, nodeID, severity, title string) {
 	p.mu.Lock()
-	res, err := p.db.Exec("UPDATE incidents SET resolved = 1 WHERE id = ? AND resolved = 0", id)
+	res, err := p.db.Exec("UPDATE incidents SET resolved = 1, resolved_at = ? WHERE id = ? AND resolved = 0", time.Now().Unix(), id)
 	p.mu.Unlock()
 	if err != nil {
 		return

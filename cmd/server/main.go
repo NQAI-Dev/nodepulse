@@ -444,6 +444,51 @@ func main() {
 		w.Write([]byte(`{"success":true}` + "\n"))
 	})
 
+	mux.HandleFunc("GET /api/v1/incidents/history", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			uid = 1
+		}
+		rangeKey := r.URL.Query().Get("range")
+		nodeID := r.URL.Query().Get("node_id")
+		severity := r.URL.Query().Get("severity")
+		limit := 100
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+				limit = n
+			}
+		}
+		items, err := pStore.GetIncidentHistory(uid, rangeKey, nodeID, severity, limit)
+		if err != nil {
+			http.Error(w, `{"error":"history query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"range":  rangeKey,
+			"items":  items,
+			"count":  len(items),
+		})
+	})
+
+	mux.HandleFunc("GET /api/v1/incidents/stats", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			uid = 1
+		}
+		rangeKey := r.URL.Query().Get("range")
+		buckets, err := pStore.GetIncidentStats(uid, rangeKey)
+		if err != nil {
+			http.Error(w, `{"error":"stats query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"range":   rangeKey,
+			"buckets": buckets,
+		})
+	})
+
 	// 6. Dynamic 1-line installation script generator
 	mux.HandleFunc("GET /install.sh", func(w http.ResponseWriter, r *http.Request) {
 		token := r.URL.Query().Get("token")
