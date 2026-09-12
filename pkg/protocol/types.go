@@ -31,6 +31,22 @@ type DiskStats struct {
 	UsedPercent float64 `json:"used_pct"`
 }
 
+// NetStats captures the cumulative byte/packet counters for a single
+// network interface at heartbeat time. Rates (bytes/sec) are derived on
+// the server by subtracting the previous sample's counters.
+type NetStats struct {
+	Iface       string `json:"iface"`
+	RxBytes     uint64 `json:"rx_bytes"`
+	TxBytes     uint64 `json:"tx_bytes"`
+	RxPackets   uint64 `json:"rx_packets"`
+	TxPackets   uint64 `json:"tx_packets"`
+	RxErrors    uint64 `json:"rx_errors"`
+	TxErrors    uint64 `json:"tx_errors"`
+	RxDrops     uint64 `json:"rx_drops"`
+	TxDrops     uint64 `json:"tx_drops"`
+	SpeedMbps   uint64 `json:"speed_mbps,omitempty"` // nominal link speed, 0 if unknown
+}
+
 type ServiceStatus struct {
 	Name    string `json:"name"`
 	Type    string `json:"type"` // systemd, docker, port
@@ -46,6 +62,7 @@ type Heartbeat struct {
 	CPU       CPUStats        `json:"cpu"`
 	Memory    MemoryStats     `json:"memory"`
 	Disks     []DiskStats     `json:"disks"`
+	Network   []NetStats      `json:"network,omitempty"`
 	Services  []ServiceStatus `json:"services,omitempty"`
 }
 

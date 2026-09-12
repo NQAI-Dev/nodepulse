@@ -94,6 +94,11 @@ func (c *Collector) Collect() (*protocol.Heartbeat, error) {
 		hb.Services = append(hb.Services, dockerServices...)
 	}
 
+	// Collect network interface counters (lo filtered).
+	if net := CollectNetworkInterfaces(); len(net) > 0 {
+		hb.Network = net
+	}
+
 	// Collect requested systemd units
 	if systemdServices := CollectSystemdServices(c.monitoredUnits); len(systemdServices) > 0 {
 		hb.Services = append(hb.Services, systemdServices...)
