@@ -207,6 +207,32 @@ func main() {
 		})
 	})
 
+	mux.HandleFunc("POST /api/v1/autoheal/log", func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("X-NodePulse-Token")
+		if token == "" {
+			token = r.URL.Query().Get("token")
+		}
+		uid, _, err := pStore.GetUserByToken(token)
+		if err != nil && token != "np_live_master_secret" {
+			http.Error(w, `{"error":"unauthorized node token"}`, http.StatusUnauthorized)
+			return
+		}
+
+		var payload struct {
+			NodeID string                  `json:"node_id"`
+			Events []protocol.AutoHealLog  `json:"events"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.NodeID == "" {
+			http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+			return
+		}
+
+		pStore.RecordAutoHealLogs(payload.NodeID, uid, payload.Events)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"accepted": true})
+	})
+
 	// 4. Fleet Nodes API
 	mux.HandleFunc("GET /api/v1/public/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

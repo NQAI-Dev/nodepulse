@@ -76,6 +76,16 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_incidents_node ON incidents(node_id, resolved);
+
+	CREATE TABLE IF NOT EXISTS autoheal_logs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		node_id TEXT NOT NULL,
+		command TEXT NOT NULL,
+		status TEXT NOT NULL,
+		reason TEXT,
+		error TEXT,
+		ts INTEGER NOT NULL
+	);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return nil, err
@@ -86,6 +96,7 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	// that indicate the column already exists).
 	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN last_notified_at INTEGER DEFAULT 0")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_incidents_active ON incidents(node_id, title, resolved)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_autoheal_logs_node_ts ON autoheal_logs(node_id, ts)")
 
 	// Create admin user if not exists
 	var adminID int64
@@ -352,4 +363,66 @@ func (p *PersistentStore) GetActiveIncidents(userID int64) []protocol.Incident {
 
 func (p *PersistentStore) GetAll() map[string]*NodeState {
 	return p.mem.GetAll()
+}
+
+// RecordAutoHealLogs persists a batch of agent-side auto-heal attempts.
+// We accept either ingest tokens or the master token. Logs older than 24h
+// are pruned at insert time so the table stays bounded.
+//
+// ponytail: storage is inlined; if the rate of auto-heal attempts ever
+// exceeds ~50k/day across the fleet, swap the in-table storage for a
+// rolling windowed on-disk log file per node and drop this method.
+func (p *PersistentStore) RecordAutoHealLogs(nodeID string, _ int64, events []protocol.AutoHealLog) {
+	if len(events) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	tx, err := p.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare("INSERT INTO autoheal_logs (node_id, command, status, reason, error, ts) VALUES (?, ?, ?, ?, ?, ?)")
+	if err != nil {
+		return
+	}
+	defer stmt.Close()
+	for _, ev := range events {
+		if ev.Command == "" {
+			continue
+		}
+		if _, err := stmt.Exec(nodeID, ev.Command, ev.Status, ev.Reason, ev.Error, ev.Ts); err != nil {
+			continue
+		}
+	}
+	tx.Commit()
+
+	cutoff := time.Now().Add(-24 * time.Hour).Unix()
+	p.db.Exec("DELETE FROM autoheal_logs WHERE ts < ?", cutoff)
+}
+
+// RecentAutoHealLogs returns the last N auto-heal attempts for a node, newest first.
+func (p *PersistentStore) RecentAutoHealLogs(nodeID string, limit int) []protocol.AutoHealLog {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := p.db.Query(
+		"SELECT command, status, reason, error, ts FROM autoheal_logs WHERE node_id = ? ORDER BY id DESC LIMIT ?",
+		nodeID, limit,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []protocol.AutoHealLog
+	for rows.Next() {
+		var ev protocol.AutoHealLog
+		if err := rows.Scan(&ev.Command, &ev.Status, &ev.Reason, &ev.Error, &ev.Ts); err == nil {
+			out = append(out, ev)
+		}
+	}
+	return out
 }

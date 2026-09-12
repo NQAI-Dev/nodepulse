@@ -53,3 +53,17 @@ type HeartbeatResponse struct {
 	Acknowledged bool     `json:"ack"`
 	Commands     []string `json:"commands,omitempty"` // auto-heal / action triggers
 }
+
+// AutoHealLog describes a single auto-heal action attempt reported by an
+// agent back to the control plane. Status values: "ok", "failed", "skipped".
+// Reason is populated when Status == "skipped" with the breaker rationale
+// ("cooldown" or "circuit_open"). RetrySec is the breaker-suggested delay
+// before the next attempt when Status == "skipped".
+type AutoHealLog struct {
+	Command  string `json:"command"`
+	Status   string `json:"status"`
+	Reason   string `json:"reason,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Ts       int64  `json:"ts"`
+	RetrySec int64  `json:"retry_sec,omitempty"`
+}

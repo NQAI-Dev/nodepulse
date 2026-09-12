@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/NQAI-Dev/nodepulse/pkg/autoheal"
 	"github.com/NQAI-Dev/nodepulse/pkg/collector"
 	"github.com/NQAI-Dev/nodepulse/pkg/protocol"
 )
@@ -54,6 +56,47 @@ func main() {
 
 	c := collector.New(*nodeID, units)
 	client := &http.Client{Timeout: 5 * time.Second}
+	breaker := autoheal.NewBreaker()
+
+	var pendingMu sync.Mutex
+	pending := []protocol.AutoHealLog{}
+
+	flushLogs := func() {
+		pendingMu.Lock()
+		if len(pending) == 0 {
+			pendingMu.Unlock()
+			return
+		}
+		batch := pending
+		pending = nil
+		pendingMu.Unlock()
+
+		base := *serverURL
+		if i := strings.Index(base, "/api/v1/"); i >= 0 {
+			base = base[:i]
+		}
+		uploadURL := base + "/api/v1/autoheal/log"
+
+		body, err := json.Marshal(map[string]interface{}{
+			"node_id": *nodeID,
+			"events":  batch,
+		})
+		if err != nil {
+			return
+		}
+		req, err := http.NewRequest(http.MethodPost, uploadURL, bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if *token != "" {
+			req.Header.Set("X-NodePulse-Token", *token)
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}
 
 	log.Printf("NodePulse Edge Agent active. ID: %s, Destination: %s, Cadence: %v, Monitored units: %d", *nodeID, *serverURL, *interval, len(units))
 
@@ -97,15 +140,59 @@ func main() {
 			var hbResp protocol.HeartbeatResponse
 			if err := json.NewDecoder(resp.Body).Decode(&hbResp); err == nil {
 				for _, cmd := range hbResp.Commands {
-					log.Printf("Executing auto-heal command: %s", cmd)
-					if err := collector.ExecuteCommand(cmd); err != nil {
-						log.Printf("Auto-heal command %s error: %v", cmd, err)
+					key := autoheal.Key(cmd)
+					decision := breaker.Allow(key)
+					ts := time.Now().Unix()
+
+					if !decision.Allowed {
+						log.Printf("Auto-heal %s skipped (%s, retry=%s)", key, decision.Reason, decision.RetryAfter)
+						pendingMu.Lock()
+						pending = append(pending, protocol.AutoHealLog{
+							Command:  key,
+							Status:   "skipped",
+							Reason:   decision.Reason,
+							Ts:       ts,
+							RetrySec: int64(decision.RetryAfter.Seconds()),
+						})
+						pendingMu.Unlock()
+						continue
 					}
+
+					execErr := collector.ExecuteCommand(cmd)
+					breaker.Record(key, execErr)
+					if execErr != nil {
+						log.Printf("Auto-heal %s error: %v", key, execErr)
+					} else {
+						log.Printf("Auto-heal %s ok", key)
+					}
+					pendingMu.Lock()
+					pending = append(pending, protocol.AutoHealLog{
+						Command: key,
+						Status:  boolToStatus(execErr == nil),
+						Error:   errString(execErr),
+						Ts:      ts,
+					})
+					pendingMu.Unlock()
 				}
 			}
 			resp.Body.Close()
 		}
 
+		flushLogs()
 		time.Sleep(*interval)
 	}
+}
+
+func boolToStatus(ok bool) string {
+	if ok {
+		return "ok"
+	}
+	return "failed"
+}
+
+func errString(e error) string {
+	if e == nil {
+		return ""
+	}
+	return e.Error()
 }
