@@ -93,6 +93,13 @@ func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string)
 	}
 }
 
+func (p *PersistentStore) ResolveIncident(id string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, err := p.db.Exec("UPDATE incidents SET resolved = 1 WHERE id = ?", id)
+	return err
+}
+
 func (p *PersistentStore) GetActiveIncidents() []protocol.Incident {
 	rows, err := p.db.Query("SELECT id, node_id, severity, title, detail, started_at, resolved FROM incidents WHERE resolved = 0 ORDER BY started_at DESC LIMIT 20")
 	if err != nil {
