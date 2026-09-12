@@ -44,7 +44,8 @@ func (p *PersistentStore) GetIncidentHistory(userID int64, rangeKey, nodeID, sev
 	cutoff := time.Now().Unix() - window
 
 	query := `SELECT i.id, i.node_id, i.severity, i.title, i.detail,
-	                 i.started_at, i.resolved, COALESCE(i.resolved_at, 0)
+	                 i.started_at, i.resolved, COALESCE(i.resolved_at, 0),
+	                 COALESCE(i.acknowledged_at, 0), COALESCE(i.last_notified_at, 0)
 	            FROM incidents i`
 	args := []interface{}{}
 	where := []string{"i.started_at >= ?"}
@@ -80,7 +81,8 @@ func (p *PersistentStore) GetIncidentHistory(userID int64, rangeKey, nodeID, sev
 		var id int64
 		var res int
 		if err := rows.Scan(&id, &i.NodeID, &i.Severity, &i.Title, &i.Detail,
-			&i.StartedAt, &res, &i.ResolvedAt); err != nil {
+			&i.StartedAt, &res, &i.ResolvedAt,
+			&i.Incident.AcknowledgedAt, &i.Incident.LastNotifiedAt); err != nil {
 			continue
 		}
 		i.ID = fmt.Sprintf("%d", id)

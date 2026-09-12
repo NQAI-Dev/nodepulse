@@ -787,7 +787,7 @@
                             <div class="timeline-body">
                                 <div class="timeline-title"><span class="severity-pill ${i.severity}">${i.severity}</span>${escapeHtml(i.title)}</div>
                                 ${i.detail ? `<div class="timeline-detail">${escapeHtml(i.detail)}</div>` : ''}
-                                ${i.resolved ? `<div class="timeline-resolved">✓ resolved in ${duration}</div>` : '<div class="timeline-resolved" style="color:var(--orange);">⚠ active</div>'}
+                                ${i.resolved ? `<div class="timeline-resolved">✓ resolved in ${duration}</div>` : (i.acknowledged_at ? `<div class="timeline-resolved" style="color:var(--accent);">✓ acknowledged ${formatDuration(Math.max(0, Math.floor((Date.now()/1000)) - i.acknowledged_at))} ago</div>` : '<div class="timeline-resolved" style="color:var(--orange);">⚠ active · not acknowledged</div>')}
                             </div>
                             <div class="timeline-meta">${startedAt.toLocaleString()}</div>
                         </div>
