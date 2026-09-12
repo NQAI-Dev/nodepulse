@@ -233,6 +233,39 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]bool{"accepted": true})
 	})
 
+	mux.HandleFunc("GET /api/v1/autoheal/logs", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		nodeID := r.URL.Query().Get("node_id")
+		if nodeID == "" {
+			http.Error(w, `{"error":"node_id required"}`, http.StatusBadRequest)
+			return
+		}
+
+		limit := 50
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+				limit = n
+			}
+		}
+
+		all := pStore.GetUserNodes(uid)
+		if _, ok := all[nodeID]; !ok {
+			http.Error(w, `{"error":"node not in your fleet"}`, http.StatusForbidden)
+			return
+		}
+
+		logs := pStore.RecentAutoHealLogs(nodeID, limit)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"node_id": nodeID,
+			"events":  logs,
+		})
+	})
+
 	// 4. Fleet Nodes API
 	mux.HandleFunc("GET /api/v1/public/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
