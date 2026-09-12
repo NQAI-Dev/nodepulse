@@ -699,6 +699,58 @@ func main() {
 		})
 	})
 
+	// 8. Webhook delivery audit: lists the recent webhook deliveries the
+	// operator's account fired, plus aggregate counters. Useful for
+	// debugging "is my custom integration receiving incident.created events
+	// or did the signature break?".
+	mux.HandleFunc("GET /api/v1/webhook/deliveries", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		limit := 50
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+				limit = n
+			}
+		}
+		rows, err := pStore.WebhookDeliveries(uid, limit)
+		if err != nil {
+			http.Error(w, `{"error":"deliveries query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		if rows == nil {
+			rows = []protocol.WebhookDelivery{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"items": rows,
+			"count": len(rows),
+		})
+	})
+
+	mux.HandleFunc("GET /api/v1/webhook/stats", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		windowSec := int64(86400)
+		if v := r.URL.Query().Get("window"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 7*24*3600 {
+				windowSec = int64(n)
+			}
+		}
+		stats, err := pStore.WebhookDeliveryStats(uid, windowSec)
+		if err != nil {
+			http.Error(w, `{"error":"stats query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(stats)
+	})
+
 	// 6. Dynamic 1-line installation script generator
 	mux.HandleFunc("GET /install.sh", func(w http.ResponseWriter, r *http.Request) {
 		token := r.URL.Query().Get("token")

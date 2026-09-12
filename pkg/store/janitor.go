@@ -11,6 +11,10 @@ const (
 	// before the janitor sweeps them. Open (unresolved) incidents are
 	// never pruned.
 	incidentRetentionDays = 90
+	// webhookDeliveryRetentionDays bounds the webhook_deliveries audit
+	// table. Operators care about the last few weeks for post-mortems; the
+	// recorder guarantees nothing operational depends on older rows.
+	webhookDeliveryRetentionDays = 30
 	// janitorInterval is how often the background sweeper runs.
 	janitorInterval = 1 * time.Hour
 )
@@ -19,6 +23,8 @@ const (
 // Exported for tests + operator metrics; safe to read without a lock.
 var IncidentsPrunedTotal int64
 var MaintenanceExpiredTotal int64
+var WebhookDeliveriesPrunedTotal int64
+var WebhookDeliveriesFlushedTotal int64
 
 // RunJanitor blocks until ctx is cancelled, sweeping expired data every
 // janitorInterval. Safe to call once at server start; the work is cheap
@@ -76,5 +82,34 @@ func (p *PersistentStore) runJanitorPass() {
 		}
 	} else {
 		log.Printf("[janitor] maintenance prune error: %v", err)
+	}
+
+	// Drain the in-memory webhook audit buffer first so rows don't pile up
+	// between sweeps; SQLite then handles the durable half. On DB error we
+	// re-queue so the next pass (within janitorInterval) retries.
+	if p.whRecorder != nil && p.whRecorder.Pending() > 0 {
+		pending := p.whRecorder.Drain()
+		if written, err := p.FlushWebhookDeliveries(pending); err != nil {
+			log.Printf("[janitor] webhook flush error: %v (re-queueing %d rows)", err, len(pending))
+			p.whRecorder.Requeue(pending)
+		} else if written > 0 {
+			WebhookDeliveriesFlushedTotal += int64(written)
+			log.Printf("[janitor] flushed %d webhook deliveries", written)
+		}
+	}
+
+	// Bound the audit trail at 30 days. Failed deliveries worth a closer
+	// look typically get noticed (and screenshotted) within hours; older
+	// rows are noise.
+	if res, err := p.db.Exec(
+		`DELETE FROM webhook_deliveries WHERE ts < ?`,
+		time.Now().Add(-webhookDeliveryRetentionDays*24*time.Hour).Unix(),
+	); err == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			WebhookDeliveriesPrunedTotal += n
+			log.Printf("[janitor] pruned %d webhook deliveries older than %d days", n, webhookDeliveryRetentionDays)
+		}
+	} else {
+		log.Printf("[janitor] webhook deliveries prune error: %v", err)
 	}
 }

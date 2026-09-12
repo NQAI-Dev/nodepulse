@@ -247,6 +247,24 @@
         </div>
     </div>
 
+    <div class="modal-overlay" id="webhook-log-modal" style="display: none;">
+        <div class="modal" style="max-width: 760px;">
+            <div class="modal-title">🛰 Webhook Delivery Log</div>
+            <div style="display: flex; gap: 0.5rem; margin-bottom: 0.8rem;">
+                <button class="btn btn-primary" onclick="loadWebhookLog(3600)" style="font-size: 0.75rem;">Last 1h</button>
+                <button class="btn" onclick="loadWebhookLog(86400)" style="font-size: 0.75rem;">Last 24h</button>
+                <button class="btn" onclick="loadWebhookLog(604800)" style="font-size: 0.75rem;">Last 7d</button>
+                <span style="flex:1"></span>
+                <span class="user-tag" id="webhook-stats-tag">—</span>
+            </div>
+            <div id="webhook-log-summary" style="display:flex; gap:0.5rem; margin-bottom:0.8rem;"></div>
+            <div id="webhook-log-table" style="max-height: 360px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px;"></div>
+            <div class="modal-actions" style="margin-top: 1rem;">
+                <button class="btn" onclick="closeWebhookLogModal()">Закрыть</button>
+            </div>
+        </div>
+    </div>
+
     <footer>
         NodePulse Cloud Platform v1.1.0 • CryptoPay Checkout • Developed by NQAI
     </footer>
@@ -380,6 +398,7 @@
                 bar.innerHTML = `
                     <a href="/status.html" target="_blank" class="btn" style="text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">📊 Status</a>
                     <button class="btn" onclick="openSettingsModal()">⚙️ Алерты</button>
+                    <button class="btn" onclick="openWebhookLogModal()">🛰 Webhook Log</button>
                     <span class="user-tag">👤 ${currentAuth.user.username}</span>
                     <button class="btn" onclick="logout()">Выйти</button>
                 `;
@@ -442,6 +461,70 @@
             const text = document.getElementById('install-cmd').innerText;
             navigator.clipboard.writeText(text);
             alert('Команда скопирована в буфер обмена!');
+        }
+
+        function openWebhookLogModal() {
+            if (!currentAuth) { openModal(false); return; }
+            document.getElementById('webhook-log-modal').style.display = 'flex';
+            loadWebhookLog(86400);
+        }
+        function closeWebhookLogModal() {
+            document.getElementById('webhook-log-modal').style.display = 'none';
+        }
+        async function loadWebhookLog(windowSec) {
+            if (!currentAuth) return;
+            const headers = {'Authorization': 'Bearer ' + currentAuth.token};
+            try {
+                const [statsRes, listRes] = await Promise.all([
+                    fetch('/api/v1/webhook/stats?window=' + windowSec, {headers}),
+                    fetch('/api/v1/webhook/deliveries?limit=100', {headers}),
+                ]);
+                if (!statsRes.ok || !listRes.ok) throw new Error('http ' + statsRes.status + '/' + listRes.status);
+                const stats = await statsRes.json();
+                const data = await listRes.json();
+                renderWebhookSummary(stats);
+                renderWebhookTable(data.items || []);
+            } catch (e) {
+                document.getElementById('webhook-log-table').innerHTML = `<div style="color:var(--orange); padding:1rem; text-align:center; font-size:0.8rem;">Не удалось загрузить: ${escapeHtml(String(e))}</div>`;
+            }
+        }
+        function renderWebhookSummary(s) {
+            const okPct = s.total > 0 ? Math.round((s.ok / s.total) * 100) : 100;
+            const fail = s.total - s.ok;
+            const failColor = fail > 0 ? 'var(--orange)' : 'var(--text-dim)';
+            document.getElementById('webhook-stats-tag').innerText = `${s.total} / ${s.distinct_urls} URLs / last ${Math.round(s.window_seconds / 3600)}h`;
+            document.getElementById('webhook-log-summary').innerHTML = `
+                <div class="metric-box" style="flex:1;"><div style="font-size:0.65rem; color:var(--text-dim); text-transform:uppercase;">OK</div><div style="font-size:1.2rem; color:var(--green); font-weight:700;">${s.ok}</div></div>
+                <div class="metric-box" style="flex:1;"><div style="font-size:0.65rem; color:var(--text-dim); text-transform:uppercase;">Failed</div><div style="font-size:1.2rem; color:${failColor}; font-weight:700;">${fail}</div></div>
+                <div class="metric-box" style="flex:1;"><div style="font-size:0.65rem; color:var(--text-dim); text-transform:uppercase;">Success Rate</div><div style="font-size:1.2rem; color:${fail > 0 ? 'var(--orange)' : 'var(--green)'}; font-weight:700;">${okPct}%</div></div>
+            `;
+        }
+        function renderWebhookTable(items) {
+            if (!items.length) {
+                document.getElementById('webhook-log-table').innerHTML = '<div style="color:var(--text-dim); padding:1.5rem; text-align:center; font-size:0.8rem;">Доставок за выбранный период не было.</div>';
+                return;
+            }
+            const rows = items.map(d => {
+                const when = new Date(d.timestamp * 1000).toLocaleString();
+                const statusColor = d.ok ? 'var(--green)' : 'var(--orange)';
+                const statusIcon = d.ok ? '✅' : '❌';
+                const errCell = d.error ? `<div style="color:var(--orange); font-size:0.65rem; margin-top:2px;">${escapeHtml(d.error)}</div>` : '';
+                return `
+                    <div style="display:grid; grid-template-columns: 56px 1fr auto; gap:0.5rem; padding:0.5rem 0.7rem; border-bottom: 1px solid var(--border); font-size:0.75rem; align-items:start;">
+                        <div style="color:${statusColor}; font-weight:700; font-family:var(--font-mono);">${statusIcon} ${d.status || '—'}</div>
+                        <div style="min-width:0;">
+                            <div style="color:var(--text-bright); font-weight:600;">${escapeHtml(d.event)}${d.incident_id ? ` <span style="color:var(--text-dim); font-weight:normal;">#${escapeHtml(d.incident_id)}</span>` : ''}</div>
+                            <div style="color:var(--text-dim); font-size:0.65rem; word-break:break-all;">${escapeHtml(d.url)}</div>
+                            ${errCell}
+                        </div>
+                        <div style="text-align:right; color:var(--text-dim); font-family:var(--font-mono);">
+                            <div>${when}</div>
+                            <div style="font-size:0.65rem;">${d.attempts || 1} attempt${d.attempts > 1 ? 's' : ''} · ${d.total_latency_ms}ms</div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            document.getElementById('webhook-log-table').innerHTML = rows;
         }
 
         function renderSparkline(history, key) {

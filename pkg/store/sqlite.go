@@ -21,10 +21,16 @@ type PersistentStore struct {
 	mu            sync.Mutex
 	alerter       alerter.Notifier
 	webhook       *alerter.WebhookDispatcher
+	whRecorder    *alerter.WebhookRecorder // audit-trail wrapper around webhook
 	defaultChatID int64 // remembered at construction so we can target the configured chat without asking the Notifier
 	uptime        *uptimeTracker
 	netRates      *networkRateTracker
 }
+
+// Recorder exposes the webhook audit-trail wrapper so the janitor can drain
+// its in-memory buffer into SQLite. May be nil if the constructor is invoked
+// via lower-level test helpers; callers must nil-check.
+func (p *PersistentStore) Recorder() *alerter.WebhookRecorder { return p.whRecorder }
 
 // SetNotifier swaps the outbound user-facing dispatcher. Used by tests to
 // capture calls; production wiring stays on the Telegram *Dispatcher.
@@ -138,6 +144,29 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_mw_user ON maintenance_windows(user_id, end_unix)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_mw_nodes ON maintenance_windows(node_ids, end_unix)")
 
+	// Webhook delivery audit: one row per outbound webhook attempt. The
+	// recorder (pkg/alerter/webhook_recorder.go) buffers rows in memory and
+	// FlushWebhookDeliveries drains them in batches; the janitor prunes
+	// anything older than webhookDeliveryRetentionDays to keep the table
+	// bounded. user_id is denormalized so the operator endpoint can scope
+	// reads without joining against incidents/node_owners.
+	db.Exec(`CREATE TABLE IF NOT EXISTS webhook_deliveries (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		incident_id TEXT DEFAULT '',
+		event TEXT NOT NULL,
+		url TEXT NOT NULL,
+		attempts INTEGER NOT NULL DEFAULT 1,
+		status INTEGER NOT NULL DEFAULT 0,
+		ok INTEGER NOT NULL DEFAULT 0,
+		error TEXT DEFAULT '',
+		latency_ms INTEGER NOT NULL DEFAULT 0,
+		total_latency_ms INTEGER NOT NULL DEFAULT 0,
+		ts INTEGER NOT NULL
+	)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_whdel_user_ts ON webhook_deliveries(user_id, ts)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_whdel_ts ON webhook_deliveries(ts)")
+
 	// Create admin user if not exists
 	var adminID int64
 	err = db.QueryRow("SELECT id FROM users WHERE username = 'admin'").Scan(&adminID)
@@ -193,11 +222,13 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		return nil, err
 	}
 
+	wh := alerter.NewWebhook()
 	return &PersistentStore{
 		db:            db,
 		mem:           New(),
 		alerter:       alerter.New(botToken, chatID),
-		webhook:       alerter.NewWebhook(),
+		webhook:       wh,
+		whRecorder:    alerter.NewWebhookRecorder(wh),
 		defaultChatID: chatID,
 		uptime:        newUptimeTracker(),
 		netRates:      newNetworkRateTracker(),
@@ -449,6 +480,12 @@ func (p *PersistentStore) notifyAfterCreate(incidentID, nodeID, severity, title,
 	if settings == nil {
 		return
 	}
+	var incidentIDNum int64
+	if incidentID != "" {
+		if n, err := strconv.ParseInt(incidentID, 10, 64); err == nil {
+			incidentIDNum = n
+		}
+	}
 	if severity == "critical" && !settings.NotifyCritical {
 		return
 	}
@@ -502,8 +539,14 @@ func (p *PersistentStore) notifyAfterCreate(incidentID, nodeID, severity, title,
 		}
 		// Same rationale as the alerter: webhook dispatcher does its own
 		// retries/backoff with a bounded timeout, so keep the call site
-		// synchronous for predictability.
-		p.webhook.DispatchSigned(settings.WebhookURL, settings.WebhookSecret, whEvent)
+		// synchronous for predictability. The recorder (when present)
+		// writes the audit row in-memory; the janitor flushes it to
+		// SQLite in batches.
+		if p.whRecorder != nil {
+			p.whRecorder.DispatchSigned(ownerID, incidentIDNum, settings.WebhookURL, settings.WebhookSecret, whEvent)
+		} else {
+			p.webhook.DispatchSigned(settings.WebhookURL, settings.WebhookSecret, whEvent)
+		}
 	}
 }
 
