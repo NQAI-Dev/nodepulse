@@ -13,11 +13,15 @@ import (
 )
 
 type Collector struct {
-	nodeID string
+	nodeID        string
+	monitoredUnits []string
 }
 
-func New(nodeID string) *Collector {
-	return &Collector{nodeID: nodeID}
+func New(nodeID string, monitoredUnits []string) *Collector {
+	return &Collector{
+		nodeID:        nodeID,
+		monitoredUnits: monitoredUnits,
+	}
 }
 
 func (c *Collector) Collect() (*protocol.Heartbeat, error) {
@@ -31,7 +35,7 @@ func (c *Collector) Collect() (*protocol.Heartbeat, error) {
 			Hostname: hostname,
 			OS:       runtime.GOOS,
 			Arch:     runtime.GOARCH,
-			Version:  "0.2.0-platform",
+			Version:  "0.3.0-enterprise",
 		},
 		CPU: protocol.CPUStats{
 			Cores: runtime.NumCPU(),
@@ -83,6 +87,16 @@ func (c *Collector) Collect() (*protocol.Heartbeat, error) {
 				UsedPercent: usedPct,
 			})
 		}
+	}
+
+	// Collect Docker containers
+	if dockerServices := CollectDockerServices(); len(dockerServices) > 0 {
+		hb.Services = append(hb.Services, dockerServices...)
+	}
+
+	// Collect requested systemd units
+	if systemdServices := CollectSystemdServices(c.monitoredUnits); len(systemdServices) > 0 {
+		hb.Services = append(hb.Services, systemdServices...)
 	}
 
 	return hb, nil

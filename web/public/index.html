@@ -3,113 +3,200 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NodePulse Fleet Control</title>
+    <title>NodePulse Enterprise Fleet</title>
     <style>
         :root {
-            --bg: #0d1117;
-            --surface: #161b22;
-            --border: #30363d;
-            --text: #c9d1d9;
-            --text-bright: #f0f6fc;
-            --accent: #58a6ff;
-            --green: #2ea043;
-            --red: #f85149;
+            --bg: #090d13;
+            --surface: #111722;
+            --surface-hover: #161f2e;
+            --border: #212d3d;
+            --text-dim: #7d8b99;
+            --text: #c5d1de;
+            --text-bright: #ffffff;
+            --blue: #388bfd;
+            --green: #238636;
+            --green-glow: #2ea043;
+            --red: #da3633;
             --orange: #d29922;
+            --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         }
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; }
-        body { background: var(--bg); color: var(--text); padding: 2rem; }
-        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
-        h1 { color: var(--text-bright); font-size: 1.5rem; display: flex; align-items: center; gap: 0.5rem; }
-        .badge { background: var(--surface); border: 1px solid var(--border); padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.8rem; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1.5rem; }
-        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; transition: transform 0.1s; }
-        .card:hover { transform: translateY(-2px); }
-        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
-        .node-id { font-weight: bold; color: var(--text-bright); font-size: 1.1rem; }
-        .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-        .status-online { background: var(--green); box-shadow: 0 0 8px var(--green); }
-        .status-warning { background: var(--orange); box-shadow: 0 0 8px var(--orange); }
-        .status-offline { background: var(--red); }
-        .metric-row { display: flex; justify-content: space-between; margin-bottom: 0.5rem; font-size: 0.9rem; }
-        .progress-bar { background: var(--border); height: 6px; border-radius: 3px; overflow: hidden; margin-top: 0.25rem; margin-bottom: 0.75rem; }
-        .progress-fill { height: 100%; background: var(--accent); }
-        .footer { margin-top: 2rem; font-size: 0.8rem; color: #8b949e; text-align: center; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 2rem; min-height: 100vh; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; padding-bottom: 1.25rem; border-bottom: 1px solid var(--border); }
+        .logo-area { display: flex; align-items: center; gap: 0.75rem; }
+        .logo-icon { width: 36px; height: 36px; background: linear-gradient(135deg, #1f6feb, #58a6ff); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 1.2rem; color: #fff; box-shadow: 0 0 16px rgba(56, 139, 253, 0.4); }
+        h1 { font-size: 1.4rem; font-weight: 700; color: var(--text-bright); letter-spacing: -0.5px; }
+        .stats-bar { display: flex; gap: 0.75rem; }
+        .badge { background: var(--surface); border: 1px solid var(--border); padding: 0.35rem 0.75rem; border-radius: 6px; font-size: 0.82rem; font-family: var(--font-mono); color: var(--text-dim); }
+        .badge b { color: var(--text-bright); }
+        
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 1.5rem; }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem; transition: border-color 0.2s, box-shadow 0.2s; position: relative; overflow: hidden; }
+        .card:hover { border-color: #388bfd88; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+        .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1rem; }
+        .node-name { font-size: 1.15rem; font-weight: 600; color: var(--text-bright); }
+        .node-meta { font-size: 0.78rem; color: var(--text-dim); font-family: var(--font-mono); margin-top: 2px; }
+        
+        .status-pill { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; font-family: var(--font-mono); text-transform: uppercase; }
+        .pill-online { background: rgba(46, 160, 67, 0.15); color: #3fb950; border: 1px solid rgba(46, 160, 67, 0.3); }
+        .pill-warning { background: rgba(210, 153, 34, 0.15); color: #e3b341; border: 1px solid rgba(210, 153, 34, 0.3); }
+        .pill-offline { background: rgba(218, 54, 51, 0.15); color: #f85149; border: 1px solid rgba(218, 54, 51, 0.3); }
+        .pulse-circle { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+        .pill-online .pulse-circle { box-shadow: 0 0 8px #3fb950; }
+
+        .metrics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem; }
+        .metric-box { background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem; }
+        .metric-label { font-size: 0.72rem; text-transform: uppercase; color: var(--text-dim); font-weight: 600; margin-bottom: 4px; display: flex; justify-content: space-between; }
+        .metric-value { font-size: 1.1rem; font-weight: 700; color: var(--text-bright); font-family: var(--font-mono); }
+        .metric-sub { font-size: 0.72rem; color: var(--text-dim); margin-top: 2px; }
+
+        .sparkline { width: 100%; height: 36px; stroke: var(--blue); stroke-width: 1.5; fill: rgba(56, 139, 253, 0.08); }
+
+        .section-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); font-weight: 700; margin: 1rem 0 0.5rem; display: flex; justify-content: space-between; }
+        .service-list { max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+        .service-item { display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 0.8rem; font-family: var(--font-mono); }
+        .service-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+        .tag-active { color: #3fb950; font-weight: 600; font-size: 0.72rem; }
+        .tag-down { color: #f85149; font-weight: 600; font-size: 0.72rem; }
+        .docker-badge { background: #0087ff22; color: #58a6ff; font-size: 0.68rem; padding: 1px 4px; border-radius: 3px; margin-right: 4px; }
+
+        footer { margin-top: 3rem; text-align: center; font-size: 0.8rem; color: var(--text-dim); border-top: 1px solid var(--border); padding-top: 1.5rem; }
     </style>
 </head>
 <body>
     <header>
-        <h1>⚡ NodePulse <span>Fleet</span></h1>
-        <div>
-            <span class="badge" id="node-count">Nodes: 0</span>
-            <span class="badge" id="refresh-time">Updated: Just now</span>
+        <div class="logo-area">
+            <div class="logo-icon">⚡</div>
+            <div>
+                <h1>NodePulse Enterprise</h1>
+                <div style="font-size: 0.78rem; color: var(--text-dim)">Autonomous Fleet Infrastructure Control</div>
+            </div>
+        </div>
+        <div class="stats-bar">
+            <div class="badge">Nodes: <b id="total-nodes">0</b></div>
+            <div class="badge">Live telemetry: <b id="live-time">...</b></div>
         </div>
     </header>
 
-    <div class="grid" id="fleet-grid">
-        <!-- Dynamically filled -->
-    </div>
+    <div class="grid" id="nodes-grid"></div>
 
-    <div class="footer">
-        NodePulse Ingestion Engine • Distributed Edge Control
-    </div>
+    <footer>
+        NodePulse Platform Engine v0.3.0 • Developed autonomously by NQAI
+    </footer>
 
     <script>
-        async function fetchFleet() {
+        function renderSparkline(history, key) {
+            if (!history || history.length < 2) return '';
+            const values = history.map(h => h[key] || 0);
+            const min = Math.min(...values);
+            const max = Math.max(...values) || 1;
+            const range = (max - min) || 1;
+            const w = 180, h = 32;
+            const step = w / (values.length - 1);
+            
+            const points = values.map((v, i) => {
+                const x = (i * step).toFixed(1);
+                const y = (h - ((v - min) / range) * (h - 6) - 3).toFixed(1);
+                return `${x},${y}`;
+            }).join(' ');
+
+            return `
+                <svg class="sparkline" viewBox="0 0 ${w} ${h}">
+                    <polyline fill="none" points="${points}" />
+                </svg>
+            `;
+        }
+
+        async function fetchNodes() {
             try {
                 const res = await fetch('/api/v1/nodes');
-                const data = await res.json();
-                render(data);
-            } catch (e) {
-                console.error(e);
+                const nodes = await res.json();
+                render(nodes);
+            } catch (err) {
+                console.error(err);
             }
         }
 
         function render(nodes) {
-            const grid = document.getElementById('fleet-grid');
-            const count = Object.keys(nodes).length;
-            document.getElementById('node-count').innerText = `Nodes: ${count}`;
-            document.getElementById('refresh-time').innerText = `Updated: ${new Date().toLocaleTimeString()}`;
+            const grid = document.getElementById('nodes-grid');
+            const nodeEntries = Object.entries(nodes);
+            document.getElementById('total-nodes').innerText = nodeEntries.length;
+            document.getElementById('live-time').innerText = new Date().toLocaleTimeString();
 
             grid.innerHTML = '';
-            for (const [id, node] of Object.entries(nodes)) {
+            for (const [id, node] of nodeEntries) {
                 const latest = node.latest || {};
-                const mem = latest.memory || {};
                 const cpu = latest.cpu || {};
+                const mem = latest.memory || {};
                 const disk = (latest.disks && latest.disks[0]) || {};
+                const services = latest.services || [];
+                const history = node.history || [];
 
                 const card = document.createElement('div');
                 card.className = 'card';
+
+                let servicesHtml = '<div style="font-size: 0.75rem; color: #6e7681;">No active service probes</div>';
+                if (services.length > 0) {
+                    servicesHtml = services.slice(0, 8).map(s => `
+                        <div class="service-item">
+                            <span class="service-name">
+                                <span class="docker-badge">${s.type}</span>
+                                ${s.name}
+                            </span>
+                            <span class="${s.active ? 'tag-active' : 'tag-down'}">
+                                ${s.active ? '● RUNNING' : '■ ' + (s.status.substring(0, 14))}
+                            </span>
+                        </div>
+                    `).join('');
+                }
+
                 card.innerHTML = `
-                    <div class="card-header">
-                        <span class="node-id">${id}</span>
-                        <span class="status-dot status-${node.status}"></span>
+                    <div class="card-top">
+                        <div>
+                            <div class="node-name">${id}</div>
+                            <div class="node-meta">${node.info.hostname || id} • ${node.info.os}/${node.info.arch} • ${cpu.cores || 1} CPU</div>
+                        </div>
+                        <div class="status-pill pill-${node.status}">
+                            <span class="pulse-circle"></span>
+                            ${node.status}
+                        </div>
                     </div>
-                    <div style="font-size: 0.8rem; color: #8b949e; margin-bottom: 1rem;">
-                        ${node.info.os}/${node.info.arch} • Load: ${cpu.load_1.toFixed(2)} / ${cpu.load_5.toFixed(2)}
+
+                    <div class="metrics-grid">
+                        <div class="metric-box">
+                            <div class="metric-label">
+                                <span>Load Avg</span>
+                                <span style="color: var(--blue)">1m / 5m</span>
+                            </div>
+                            <div class="metric-value">${(cpu.load_1 || 0).toFixed(2)}</div>
+                            <div class="metric-sub">${(cpu.load_5 || 0).toFixed(2)} / ${(cpu.load_15 || 0).toFixed(2)}</div>
+                            ${renderSparkline(history, 'load1')}
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-label">
+                                <span>Memory</span>
+                                <span>${(mem.used_pct || 0).toFixed(1)}%</span>
+                            </div>
+                            <div class="metric-value">${((mem.used_bytes || 0) / (1024**3)).toFixed(2)} GB</div>
+                            <div class="metric-sub">of ${((mem.total_bytes || 0) / (1024**3)).toFixed(2)} GB total</div>
+                            ${renderSparkline(history, 'mem_pct')}
+                        </div>
                     </div>
-                    <div>
-                        <div class="metric-row">
-                            <span>Memory (${(mem.used_pct || 0).toFixed(1)}%)</span>
-                            <span>${((mem.used_bytes || 0)/(1024**3)).toFixed(1)} / ${((mem.total_bytes || 0)/(1024**3)).toFixed(1)} GB</span>
-                        </div>
-                        <div class="progress-bar">
-                            <div class="progress-fill" style="width: ${mem.used_pct || 0}%"></div>
-                        </div>
-                        <div class="metric-row">
-                            <span>Disk (${(disk.used_pct || 0).toFixed(1)}%)</span>
-                            <span>${((disk.total_bytes - disk.free_bytes || 0)/(1024**3)).toFixed(1)} / ${((disk.total_bytes || 0)/(1024**3)).toFixed(1)} GB</span>
-                        </div>
-                        <div class="progress-bar">
-                            <div class="progress-fill" style="width: ${disk.used_pct || 0}%"></div>
-                        </div>
+
+                    <div class="section-title">
+                        <span>Monitored Services (${services.length})</span>
+                        <span>Docker & Systemd</span>
+                    </div>
+                    <div class="service-list">
+                        ${servicesHtml}
                     </div>
                 `;
                 grid.appendChild(card);
             }
         }
 
-        fetchFleet();
-        setInterval(fetchFleet, 5000);
+        fetchNodes();
+        setInterval(fetchNodes, 3000);
     </script>
 </body>
 </html>
