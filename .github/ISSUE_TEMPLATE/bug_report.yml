@@ -1,0 +1,67 @@
+name: Bug Report
+description: Report broken behavior or unexpected output.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+        Please fill in the sections below so we can reproduce and fix the issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear, concise description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Commands, configuration snippets, or HTTP requests that trigger the bug.
+      render: bash
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        - NodePulse version (`nodepulse-agent --version`)
+        - OS / kernel (`uname -a`)
+        - Architecture (`amd64`, `arm64`, …)
+        - Deployment mode (single binary, Docker, systemd)
+      render: bash
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / output
+      description: |
+        Paste the agent or server logs covering the incident.
+        Wrap long lines in <details><summary>logs</summary>...</details>.
+
+  - type: checkboxes
+    id: check
+    attributes:
+      label: Pre-submit checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I reproduced on the latest `main` branch.
+          required: true
+        - label: I am willing to send a PR with a regression test.
+          required: false

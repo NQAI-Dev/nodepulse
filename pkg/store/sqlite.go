@@ -119,6 +119,25 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_incidents_history ON incidents(started_at, resolved)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_autoheal_logs_node_ts ON autoheal_logs(node_id, ts)")
 
+	// Maintenance windows: planned silence periods during which alerts for
+	// the matching nodes are suppressed. A row with end_unix=0 stays open
+	// until the operator closes it; rows with end_unix < now are filtered
+	// out of the active-window check at query time so we don't pay a
+	// background sweep to garbage-collect them.
+	db.Exec(`CREATE TABLE IF NOT EXISTS maintenance_windows (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		scope TEXT NOT NULL DEFAULT 'user',
+		reason TEXT DEFAULT '',
+		node_ids TEXT DEFAULT '',
+		start_unix INTEGER NOT NULL,
+		end_unix INTEGER DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		created_by TEXT DEFAULT ''
+	)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_mw_user ON maintenance_windows(user_id, end_unix)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_mw_nodes ON maintenance_windows(node_ids, end_unix)")
+
 	// Create admin user if not exists
 	var adminID int64
 	err = db.QueryRow("SELECT id FROM users WHERE username = 'admin'").Scan(&adminID)
@@ -434,6 +453,14 @@ func (p *PersistentStore) notifyAfterCreate(incidentID, nodeID, severity, title,
 		return
 	}
 	if severity == "warning" && !settings.NotifyWarning {
+		return
+	}
+
+	// Maintenance window short-circuit: an active silence window for this
+	// owner/node suppresses the outbound notification but the incident row
+	// is still recorded (for post-mortem queries). The dispatchers below
+	// are skipped entirely; webhook + Telegram never see the event.
+	if silenced, _ := p.IsNodeSilenced(ownerID, nodeID, ts); silenced {
 		return
 	}
 

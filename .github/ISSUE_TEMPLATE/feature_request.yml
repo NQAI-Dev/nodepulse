@@ -1,0 +1,48 @@
+name: Feature Request
+description: Suggest a new capability for NodePulse.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to propose new functionality.
+        For bug reports, use the **Bug Report** template instead.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What real-world problem are you trying to solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How should NodePulse behave to solve it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other tools or workarounds you tried, and why they fall short.
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope & priority
+      description: Which component(s) are touched — agent, server, web UI, alerting, …?
+
+  - type: checkboxes
+    id: check
+    attributes:
+      label: Pre-submit checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I am willing to send a PR implementing the feature.
+          required: false
