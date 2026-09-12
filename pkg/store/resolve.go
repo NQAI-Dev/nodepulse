@@ -8,6 +8,15 @@ import (
 	"github.com/NQAI-Dev/nodepulse/pkg/protocol"
 )
 
+// abandonedContainerTTL is how long a container may stay stopped before we
+// give up waiting for it to come back. Without this, incidents like
+// "Container Stopped: happy_khorana" stay open forever because the agent
+// keeps shipping the container in services (active=false), and the basic
+// "container absent from services" resolution path never fires. After
+// this window the incident is auto-resolved as "abandoned" so the public
+// status page stops reporting outage.
+const abandonedContainerTTL = 24 * time.Hour
+
 // ResolveStaleIncidents marks open incidents as resolved when their condition
 // is no longer present in the latest heartbeat. Sends a resolution notification
 // to Telegram/webhook for each transition.
@@ -16,7 +25,7 @@ import (
 // counts explode; add a per-node cap + lru cache if it ever does.
 func (p *PersistentStore) ResolveStaleIncidents(hb *protocol.Heartbeat) {
 	rows, err := p.db.Query(
-		"SELECT id, node_id, severity, title FROM incidents WHERE node_id = ? AND resolved = 0",
+		"SELECT id, node_id, severity, title, started_at FROM incidents WHERE node_id = ? AND resolved = 0",
 		hb.NodeID,
 	)
 	if err != nil {
@@ -25,15 +34,16 @@ func (p *PersistentStore) ResolveStaleIncidents(hb *protocol.Heartbeat) {
 	defer rows.Close()
 
 	type openInc struct {
-		id       int64
-		severity string
-		title    string
+		id        int64
+		severity  string
+		title     string
+		startedAt int64
 	}
 	var open []openInc
 	for rows.Next() {
 		var i openInc
 		var nid string
-		if err := rows.Scan(&i.id, &nid, &i.severity, &i.title); err == nil {
+		if err := rows.Scan(&i.id, &nid, &i.severity, &i.title, &i.startedAt); err == nil {
 			open = append(open, i)
 		}
 	}
@@ -41,8 +51,9 @@ func (p *PersistentStore) ResolveStaleIncidents(hb *protocol.Heartbeat) {
 		return
 	}
 
+	now := time.Now()
 	for _, inc := range open {
-		if incidentStillActive(inc.title, hb) {
+		if incidentStillActive(inc.title, hb, now, inc.startedAt) {
 			continue
 		}
 		p.markResolvedAndNotify(inc.id, hb.NodeID, inc.severity, inc.title)
@@ -51,7 +62,12 @@ func (p *PersistentStore) ResolveStaleIncidents(hb *protocol.Heartbeat) {
 
 // incidentStillActive returns true when the heartbeat still exhibits the
 // condition implied by the incident title.
-func incidentStillActive(title string, hb *protocol.Heartbeat) bool {
+//
+// startedAt is the incident row's started_at (unix seconds). It's used for
+// the abandoned-container TTL: if a container has been reported as stopped
+// continuously for >abandonedContainerTTL, the incident auto-resolves so the
+// fleet status doesn't sit at "outage" forever for a long-dead container.
+func incidentStillActive(title string, hb *protocol.Heartbeat, now time.Time, startedAt int64) bool {
 	// Memory pressure incidents: title is exactly "High Memory Pressure".
 	if title == "High Memory Pressure" {
 		return hb.Memory.UsedPercent > 90.0
@@ -63,7 +79,15 @@ func incidentStillActive(title string, hb *protocol.Heartbeat) bool {
 		for _, s := range hb.Services {
 			if s.Name == name {
 				// Still considered active while the container is down.
-				return !s.Active
+				if s.Active {
+					return false
+				}
+				// Container still stopped — give up after abandonedContainerTTL
+				// so the incident row doesn't pin the fleet at "outage" forever.
+				if startedAt > 0 && now.Sub(time.Unix(startedAt, 0)) > abandonedContainerTTL {
+					return false
+				}
+				return true
 			}
 		}
 		// Service no longer reported by agent → consider it cleared so we
