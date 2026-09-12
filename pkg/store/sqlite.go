@@ -486,9 +486,9 @@ func (p *PersistentStore) ResolveIncident(id string) error {
 }
 
 func (p *PersistentStore) GetActiveIncidents(userID int64) []protocol.Incident {
-	query := "SELECT id, node_id, severity, title, detail, started_at, resolved FROM incidents WHERE resolved = 0 ORDER BY started_at DESC LIMIT 50"
+	query := "SELECT id, node_id, severity, title, detail, started_at, resolved, acknowledged_at, last_notified_at FROM incidents WHERE resolved = 0 ORDER BY started_at DESC LIMIT 50"
 	if userID > 1 {
-		query = fmt.Sprintf(`SELECT i.id, i.node_id, i.severity, i.title, i.detail, i.started_at, i.resolved 
+		query = fmt.Sprintf(`SELECT i.id, i.node_id, i.severity, i.title, i.detail, i.started_at, i.resolved, i.acknowledged_at, i.last_notified_at
 			FROM incidents i
 			JOIN node_owners o ON o.node_id = i.node_id
 			WHERE i.resolved = 0 AND o.user_id = %d
@@ -506,7 +506,7 @@ func (p *PersistentStore) GetActiveIncidents(userID int64) []protocol.Incident {
 		var inc protocol.Incident
 		var id int64
 		var res int
-		if err := rows.Scan(&id, &inc.NodeID, &inc.Severity, &inc.Title, &inc.Detail, &inc.StartedAt, &res); err == nil {
+		if err := rows.Scan(&id, &inc.NodeID, &inc.Severity, &inc.Title, &inc.Detail, &inc.StartedAt, &res, &inc.AcknowledgedAt, &inc.LastNotifiedAt); err == nil {
 			inc.ID = fmt.Sprintf("%d", id)
 			inc.Resolved = res == 1
 			list = append(list, inc)
