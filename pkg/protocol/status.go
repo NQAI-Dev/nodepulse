@@ -32,3 +32,16 @@ type PublicNodeUptime struct {
 	Days      int     `json:"days"`
 	UptimePct float64 `json:"uptime_pct"`
 }
+
+// PublicIncidentHistory is one row on the public status timeline.
+// Severity, title, node id, and timestamps only — operator acknowledgements
+// and tenant-scoped data are intentionally excluded.
+type PublicIncidentHistory struct {
+	ID         string `json:"id"`
+	NodeID     string `json:"node_id"`
+	Severity   string `json:"severity"`
+	Title      string `json:"title"`
+	StartedAt  int64  `json:"started_at"`
+	Resolved   bool   `json:"resolved"`
+	ResolvedAt int64  `json:"resolved_at"`
+}

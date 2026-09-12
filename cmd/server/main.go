@@ -285,6 +285,32 @@ func main() {
 		json.NewEncoder(w).Encode(pStore.GetPublicStatus())
 	})
 
+	mux.HandleFunc("GET /api/v1/public/incidents", func(w http.ResponseWriter, r *http.Request) {
+		limit := 50
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+				limit = n
+			}
+		}
+		sinceUnix := int64(0)
+		if v := r.URL.Query().Get("since"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+				sinceUnix = n
+			}
+		}
+		items, err := pStore.GetPublicIncidentHistory(sinceUnix, limit)
+		if err != nil {
+			http.Error(w, `{"error":"history query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=15")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"items": items,
+			"count": len(items),
+		})
+	})
+
 	mux.HandleFunc("GET /api/v1/nodes", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, err := getUser(r)
 		if err != nil {

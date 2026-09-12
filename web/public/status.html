@@ -245,15 +245,18 @@
 
                 const iList = document.getElementById('incidents-list');
                 if (data.recent_incidents && data.recent_incidents.length > 0) {
-                    iList.innerHTML = data.recent_incidents.map(inc => `
+                    iList.innerHTML = data.recent_incidents.map(inc => {
+                        const started = new Date(inc.started_at * 1000);
+                        const resolved = inc.resolved ? ' · <span style="color:var(--accent-green)">resolved</span>' : '';
+                        return `
                         <div class="service-row">
                             <div>
                                 <strong style="color: var(--accent-red); font-size: 0.95rem;">${inc.title}</strong>
-                                <div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px;">Node: ${inc.node_id} &bull; ${new Date(inc.started_at * 1000).toLocaleTimeString()}</div>
+                                <div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px;">Node: ${inc.node_id} &bull; ${started.toLocaleString()}${resolved}</div>
                             </div>
-                            <span class="pill pill-down">${inc.severity}</span>
-                        </div>
-                    `).join('');
+                            <span class="pill ${inc.resolved ? 'pill-active' : 'pill-down'}">${inc.severity}</span>
+                        </div>`;
+                    }).join('');
                 } else {
                     iList.innerHTML = '<p style="color: var(--accent-green); font-size: 0.9rem;">✓ Активных инцидентов не зафиксировано</p>';
                 }
