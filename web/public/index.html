@@ -158,6 +158,36 @@
         </div>
     </div>
 
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settings-modal" style="display: none;">
+        <div class="modal">
+            <div class="modal-title">⚙️ Настройки уведомлений</div>
+            <div class="form-group">
+                <label class="form-label">Telegram Chat ID</label>
+                <input class="form-input" id="cfg-tg-chat" placeholder="Например, 1033035885">
+                <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 4px;">Получите Chat ID у @userinfobot или добавьте @nodepulse_mon_bot</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Webhook URL (Slack / Discord / Custom)</label>
+                <input class="form-input" id="cfg-webhook" placeholder="https://your-domain.com/webhook">
+            </div>
+            <div style="margin-bottom: 16px;">
+                <label style="display: flex; align-items: center; gap: 8px; font-size: 0.85rem; cursor: pointer; margin-bottom: 8px;">
+                    <input type="checkbox" id="cfg-notify-critical" checked>
+                    Уведомлять о критических инцидентах (Node Down, Disk > 90%)
+                </label>
+                <label style="display: flex; align-items: center; gap: 8px; font-size: 0.85rem; cursor: pointer;">
+                    <input type="checkbox" id="cfg-notify-warning" checked>
+                    Уведомлять о предупреждениях (CPU > 80%, Mem > 85%)
+                </label>
+            </div>
+            <div class="modal-actions">
+                <button class="btn" onclick="closeSettingsModal()">Отмена</button>
+                <button class="btn btn-primary" onclick="saveSettings()">Сохранить</button>
+            </div>
+        </div>
+    </div>
+
     <footer>
         NodePulse Cloud Platform v1.1.0 • CryptoPay Checkout • Developed by NQAI
     </footer>
@@ -228,12 +258,69 @@
             }
         }
 
+        function openSettingsModal() {
+            if (!currentAuth) return openModal(false);
+            fetch('/api/v1/settings', {
+                headers: {'Authorization': 'Bearer ' + currentAuth.token}
+            })
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById('cfg-tg-chat').value = data.telegram_chat_id || '';
+                document.getElementById('cfg-webhook').value = data.webhook_url || '';
+                document.getElementById('cfg-notify-critical').checked = data.notify_critical !== false;
+                document.getElementById('cfg-notify-warning').checked = data.notify_warning !== false;
+                document.getElementById('settings-modal').style.display = 'flex';
+            })
+            .catch(e => {
+                alert('Ошибка загрузки настроек: ' + e);
+            });
+        }
+
+        function closeSettingsModal() {
+            document.getElementById('settings-modal').style.display = 'none';
+        }
+
+        async function saveSettings() {
+            if (!currentAuth) return;
+            const tgChat = document.getElementById('cfg-tg-chat').value.trim();
+            const webhook = document.getElementById('cfg-webhook').value.trim();
+            const crit = document.getElementById('cfg-notify-critical').checked;
+            const warn = document.getElementById('cfg-notify-warning').checked;
+
+            try {
+                const res = await fetch('/api/v1/settings', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + currentAuth.token
+                    },
+                    body: JSON.stringify({
+                        telegram_chat_id: tgChat,
+                        webhook_url: webhook,
+                        notify_critical: crit,
+                        notify_warning: warn
+                    })
+                });
+                if (res.ok) {
+                    closeSettingsModal();
+                    alert('Настройки алертов успешно сохранены!');
+                } else {
+                    const err = await res.json();
+                    alert('Ошибка: ' + (err.error || 'Не удалось сохранить'));
+                }
+            } catch (e) {
+                alert('Ошибка сети: ' + e);
+            }
+        }
+
         function updateAuthUI() {
             const bar = document.getElementById('auth-bar');
             const installCmd = document.getElementById('install-cmd');
 
             if (currentAuth) {
                 bar.innerHTML = `
+                    <a href="/status.html" target="_blank" class="btn" style="text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">📊 Status</a>
+                    <button class="btn" onclick="openSettingsModal()">⚙️ Алерты</button>
                     <span class="user-tag">👤 ${currentAuth.user.username}</span>
                     <button class="btn" onclick="logout()">Выйти</button>
                 `;
@@ -241,6 +328,7 @@
                 loadPlan();
             } else {
                 bar.innerHTML = `
+                    <a href="/status.html" target="_blank" class="btn" style="text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">📊 Status</a>
                     <button class="btn" onclick="openModal(false)">Войти</button>
                     <button class="btn btn-primary" onclick="openModal(true)">Создать аккаунт</button>
                 `;
