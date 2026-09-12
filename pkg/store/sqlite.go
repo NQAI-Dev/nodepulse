@@ -15,11 +15,23 @@ import (
 )
 
 type PersistentStore struct {
-	db      *sql.DB
-	mem     *Store
-	mu      sync.Mutex
-	alerter *alerter.Dispatcher
-	webhook *alerter.WebhookDispatcher
+	db            *sql.DB
+	mem           *Store
+	mu            sync.Mutex
+	alerter       alerter.Notifier
+	webhook       *alerter.WebhookDispatcher
+	defaultChatID int64 // remembered at construction so we can target the configured chat without asking the Notifier
+}
+
+// SetNotifier swaps the outbound user-facing dispatcher. Used by tests to
+// capture calls; production wiring stays on the Telegram *Dispatcher.
+//
+// ponytail: setters beat constructors once the surface gets >5 callers; if
+// the constructor signature ever changes for other reasons, fold this in.
+func (p *PersistentStore) SetNotifier(n alerter.Notifier) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.alerter = n
 }
 
 func HashPassword(pwd string) string {
@@ -112,12 +124,20 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	}
 
 	return &PersistentStore{
-		db:      db,
-		mem:     New(),
-		alerter: alerter.New(botToken, chatID),
-		webhook: alerter.NewWebhook(),
+		db:            db,
+		mem:           New(),
+		alerter:       alerter.New(botToken, chatID),
+		webhook:       alerter.NewWebhook(),
+		defaultChatID: chatID,
 	}, nil
 }
+
+func (p *PersistentStore) Webhook() *alerter.WebhookDispatcher { return p.webhook }
+
+// DefaultChatID returns the chat the dispatcher was configured with at boot.
+// ponytail: read-only accessor exists so the server can pre-fill settings UI;
+// if the value ever becomes per-user-only, drop this and read from user_settings directly.
+func (p *PersistentStore) DefaultChatID() int64 { return p.defaultChatID }
 
 // User & Auth methods
 func (p *PersistentStore) Register(username, password string) (int64, string, error) {
@@ -300,7 +320,7 @@ func (p *PersistentStore) notifyAfterCreate(nodeID, severity, title, detail stri
 	}
 
 	if p.alerter != nil {
-		tgChat := p.alerter.GetChatID()
+		tgChat := p.defaultChatID
 		if settings.TelegramChatID != "" {
 			if parsed, err := strconv.ParseInt(settings.TelegramChatID, 10, 64); err == nil && parsed != 0 {
 				tgChat = parsed

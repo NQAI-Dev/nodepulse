@@ -91,7 +91,7 @@ func (p *PersistentStore) markResolvedAndNotify(id int64, nodeID, severity, titl
 	ts := time.Now()
 
 	if p.alerter != nil && settings != nil {
-		tgChat := p.alerter.GetChatID()
+		tgChat := p.defaultChatID
 		if settings.TelegramChatID != "" {
 			if parsed, err := strconv.ParseInt(settings.TelegramChatID, 10, 64); err == nil && parsed != 0 {
 				tgChat = parsed
