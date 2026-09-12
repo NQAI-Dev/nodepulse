@@ -281,6 +281,34 @@ func main() {
 		json.NewEncoder(w).Encode(pStore.GetUserNodes(uid))
 	})
 
+	mux.HandleFunc("GET /api/v1/nodes/{nodeID}/metrics", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			uid = 1
+		}
+		nodeID := r.PathValue("nodeID")
+		if nodeID == "" {
+			http.Error(w, `{"error":"node_id required"}`, http.StatusBadRequest)
+			return
+		}
+		owns := pStore.GetUserNodes(uid)
+		if _, ok := owns[nodeID]; !ok {
+			http.Error(w, `{"error":"node not in your fleet"}`, http.StatusForbidden)
+			return
+		}
+		rangeKey := r.URL.Query().Get("range")
+		if rangeKey == "" {
+			rangeKey = "1h"
+		}
+		out, err := pStore.MetricsRange(nodeID, rangeKey)
+		if err != nil {
+			http.Error(w, `{"error":"metrics query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(out)
+	})
+
 	// 5. Settings API
 	mux.HandleFunc("GET /api/v1/settings", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, err := getUser(r)

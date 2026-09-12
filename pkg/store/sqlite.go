@@ -134,6 +134,17 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		PRIMARY KEY (node_id, day)
 	);
 	CREATE INDEX IF NOT EXISTS idx_uptime_day ON node_uptime_daily(day);
+
+	CREATE TABLE IF NOT EXISTS metric_samples (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		node_id TEXT NOT NULL,
+		ts INTEGER NOT NULL,
+		cpu_pct REAL NOT NULL,
+		load1 REAL NOT NULL,
+		mem_pct REAL NOT NULL,
+		disk_pct REAL NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_samples_node_ts ON metric_samples(node_id, ts);
 	`
 	if _, err := db.Exec(uptimeSchema); err != nil {
 		return nil, err
@@ -257,6 +268,32 @@ func (p *PersistentStore) Ingest(hb *protocol.Heartbeat) {
 
 	if _, err := p.RecordHeartbeat(hb.NodeID, time.Now()); err != nil {
 		log.Printf("uptime rollup: %v", err)
+	}
+
+	diskPct := 0.0
+	if len(hb.Disks) > 0 {
+		diskPct = hb.Disks[0].UsedPercent
+	}
+	cpuPct := 0.0
+	if hb.CPU.Cores > 0 {
+		// Saturate load1 against core count, then clamp to 100. Don't lie
+		// above 100: dashboards key off 0..100 scale and would render the
+		// spike off-chart.
+		ratio := hb.CPU.Load1 / float64(hb.CPU.Cores)
+		if ratio > 1.0 {
+			ratio = 1.0
+		}
+		cpuPct = ratio * 100.0
+	}
+	if err := p.RecordSample(MetricSample{
+		NodeID:      hb.NodeID,
+		Timestamp:   hb.Timestamp,
+		CPUPercent:  cpuPct,
+		Load1:       hb.CPU.Load1,
+		MemUsedPct:  hb.Memory.UsedPercent,
+		DiskUsedPct: diskPct,
+	}); err != nil {
+		log.Printf("metrics sample: %v", err)
 	}
 
 	if hb.Memory.UsedPercent > 92.0 {
