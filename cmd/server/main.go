@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NQAI-Dev/nodepulse/pkg/billing"
 	"github.com/NQAI-Dev/nodepulse/pkg/protocol"
 	"github.com/NQAI-Dev/nodepulse/pkg/store"
 )
@@ -20,6 +21,7 @@ func main() {
 	dbPath := flag.String("db", "nodepulse_fleet.db", "SQLite database path")
 	botToken := flag.String("tg-token", "", "Telegram Bot Token for alerts")
 	chatIDStr := flag.String("tg-chat", "", "Telegram Chat ID for alerts")
+	cryptoToken := flag.String("crypto-token", "", "CryptoBot API Token")
 	flag.Parse()
 
 	token := *botToken
@@ -36,12 +38,28 @@ func main() {
 		chatID, _ = strconv.ParseInt(cStr, 10, 64)
 	}
 
+	cToken := *cryptoToken
+	if cToken == "" {
+		cToken = os.Getenv("CRYPTOBOT_API_TOKEN")
+	}
+	cryptoClient := billing.NewCryptoBot(cToken)
+
 	pStore, err := store.NewPersistentStore(*dbPath, token, chatID)
 	if err != nil {
 		log.Fatalf("Store initialization failure: %v", err)
 	}
+	pStore.InitBillingSchema()
 
 	mux := http.NewServeMux()
+
+	getUser := func(r *http.Request) (int64, string, error) {
+		auth := r.Header.Get("Authorization")
+		tok := strings.TrimPrefix(auth, "Bearer ")
+		if tok == "" {
+			tok = r.URL.Query().Get("token")
+		}
+		return pStore.GetUserByToken(tok)
+	}
 
 	// 1. Auth endpoints
 	mux.HandleFunc("POST /api/v1/auth/register", func(w http.ResponseWriter, r *http.Request) {
@@ -86,17 +104,70 @@ func main() {
 		})
 	})
 
-	// Helper to extract authenticated user
-	getUser := func(r *http.Request) (int64, string, error) {
-		auth := r.Header.Get("Authorization")
-		tok := strings.TrimPrefix(auth, "Bearer ")
-		if tok == "" {
-			tok = r.URL.Query().Get("token")
+	// 2. Billing endpoints
+	mux.HandleFunc("POST /api/v1/billing/create-invoice", func(w http.ResponseWriter, r *http.Request) {
+		uid, uname, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
 		}
-		return pStore.GetUserByToken(tok)
-	}
 
-	// 2. Ingestion endpoint for agents (supports token verification and node binding)
+		inv, err := cryptoClient.CreateInvoice("5.00", "USDT", "NodePulse Pro Plan (1 Month)", fmt.Sprintf("%d", uid))
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+
+		invID := fmt.Sprintf("%d", inv.Result.InvoiceID)
+		pStore.SaveInvoice(invID, uid, "pro", inv.Result.Amount, inv.Result.PayURL)
+
+		log.Printf("Created invoice %s for user %s (id %d)", invID, uname, uid)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(protocol.InvoiceResponse{
+			InvoiceID: invID,
+			PayURL:    inv.Result.PayURL,
+			Amount:    inv.Result.Amount,
+			Currency:  inv.Result.Asset,
+		})
+	})
+
+	mux.HandleFunc("POST /api/v1/billing/webhook", func(w http.ResponseWriter, r *http.Request) {
+		var hook protocol.CryptoBotWebhook
+		if err := json.NewDecoder(r.Body).Decode(&hook); err != nil {
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+
+		if hook.Payload.Status == "paid" {
+			invID := fmt.Sprintf("%d", hook.Payload.InvoiceID)
+			uid, err := pStore.MarkInvoicePaid(invID)
+			if err != nil {
+				log.Printf("Error marking invoice %s paid: %v", invID, err)
+			} else {
+				log.Printf("Invoice %s successfully paid! Upgraded user %d to PRO", invID, uid)
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	})
+
+	mux.HandleFunc("GET /api/v1/billing/plan", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		plan, _ := pStore.GetUserPlan(uid)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"user_id": uid,
+			"plan":    plan,
+		})
+	})
+
+	// 3. Ingestion endpoint for agents (validates token & limits)
 	mux.HandleFunc("POST /api/v1/ingest", func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("X-NodePulse-Token")
 		if token == "" {
@@ -116,6 +187,10 @@ func main() {
 		}
 
 		if uid > 0 {
+			if !pStore.CanAddNode(uid) {
+				http.Error(w, `{"error":"node limit reached, upgrade to PRO"}`, http.StatusPaymentRequired)
+				return
+			}
 			pStore.BindNode(hb.NodeID, uid)
 		}
 		pStore.Ingest(&hb)
@@ -124,18 +199,17 @@ func main() {
 		json.NewEncoder(w).Encode(protocol.HeartbeatResponse{Acknowledged: true})
 	})
 
-	// 3. User Fleet Nodes API (isolated per user)
+	// 4. Fleet Nodes API
 	mux.HandleFunc("GET /api/v1/nodes", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, err := getUser(r)
 		if err != nil {
-			// fallback to public/demo mode (admin view for backwards compat if unauthed)
 			uid = 1
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(pStore.GetUserNodes(uid))
 	})
 
-	// 4. Incidents API (isolated per user)
+	// 5. Incidents API
 	mux.HandleFunc("GET /api/v1/incidents", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, err := getUser(r)
 		if err != nil {
@@ -159,7 +233,7 @@ func main() {
 		w.Write([]byte(`{"success":true}` + "\n"))
 	})
 
-	// 5. Dynamic 1-line installation script generator with user token
+	// 6. Dynamic 1-line installation script generator
 	mux.HandleFunc("GET /install.sh", func(w http.ResponseWriter, r *http.Request) {
 		token := r.URL.Query().Get("token")
 		if token == "" {
@@ -209,7 +283,6 @@ echo "==> [NodePulse] Agent installed and registered successfully as ${NODE_ID}!
 		w.Write([]byte(`{"status":"ok","system":"nodepulse-platform"}` + "\n"))
 	})
 
-	// Static Web Dashboard
 	mux.Handle("/", http.FileServer(http.Dir("web/public")))
 
 	server := &http.Server{
@@ -219,7 +292,7 @@ echo "==> [NodePulse] Agent installed and registered successfully as ${NODE_ID}!
 		WriteTimeout: 5 * time.Second,
 	}
 
-	log.Printf("NodePulse Platform v1.0 running on %s", *addr)
+	log.Printf("NodePulse Platform with Billing running on %s", *addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}

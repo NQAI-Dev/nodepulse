@@ -18,6 +18,7 @@
             --green: #2ea043;
             --red: #da3633;
             --orange: #d29922;
+            --purple: #a371f7;
             --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -39,13 +40,27 @@
         .btn:hover { border-color: var(--blue); }
         .btn-primary { background: #1f6feb; border-color: #388bfd; }
         .btn-primary:hover { background: #388bfd; }
+        .btn-pro { background: linear-gradient(135deg, #8a2be2, #a371f7); border-color: #a371f7; color: #fff; font-weight: 600; }
+        .btn-pro:hover { opacity: 0.9; }
+
         .user-tag { font-size: 0.8rem; font-family: var(--font-mono); color: var(--blue); padding: 0.3rem 0.6rem; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+        .plan-badge { font-size: 0.7rem; font-family: var(--font-mono); font-weight: 700; text-transform: uppercase; padding: 2px 6px; border-radius: 4px; }
+        .plan-free { background: rgba(125, 139, 153, 0.2); color: var(--text-dim); }
+        .plan-pro-badge { background: rgba(163, 113, 247, 0.2); color: var(--purple); border: 1px solid rgba(163, 113, 247, 0.4); }
 
         .onboard-box { background: linear-gradient(180deg, rgba(31, 111, 235, 0.08), rgba(0,0,0,0)); border: 1px dashed var(--blue); border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; }
         .onboard-title { font-size: 0.85rem; font-weight: 600; color: var(--text-bright); margin-bottom: 0.4rem; }
         .code-row { display: flex; gap: 0.5rem; align-items: center; background: #05080c; border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.8rem; font-family: var(--font-mono); font-size: 0.8rem; color: #79c0ff; overflow-x: auto; }
         .copy-btn { background: none; border: none; color: var(--text-dim); cursor: pointer; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; }
         .copy-btn:hover { color: #fff; background: var(--border); }
+
+        .pricing-banner { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; display: flex; flex-direction: column; gap: 0.8rem; }
+        @media (min-width: 650px) {
+            .pricing-banner { flex-direction: row; justify-content: space-between; align-items: center; }
+        }
+        .pricing-info { display: flex; flex-direction: column; gap: 0.2rem; }
+        .pricing-title { font-size: 0.95rem; font-weight: 600; color: var(--text-bright); }
+        .pricing-desc { font-size: 0.8rem; color: var(--text-dim); }
 
         .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.8rem; }
         .section-header h2 { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
@@ -78,9 +93,8 @@
 
         .sparkline { width: 100%; height: 26px; stroke: var(--blue); stroke-width: 1.5; fill: rgba(56, 139, 253, 0.08); }
 
-        /* Modal styling */
         .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 100; padding: 1rem; }
-        .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; width: 100%; max-width: 360px; padding: 1.5rem; box-shadow: 0 10px 40px rgba(0,0,0,0.5); }
+        .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; width: 100%; max-width: 380px; padding: 1.5rem; box-shadow: 0 10px 40px rgba(0,0,0,0.5); }
         .modal-title { font-size: 1.1rem; color: var(--text-bright); margin-bottom: 1rem; font-weight: 600; }
         .form-group { margin-bottom: 1rem; }
         .form-label { display: block; font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.3rem; text-transform: uppercase; }
@@ -97,13 +111,19 @@
             <div class="brand-icon">⚡</div>
             <div>
                 <h1>NodePulse Cloud</h1>
-                <div class="brand-sub">Distributed Fleet Telemetry & Incident Control</div>
+                <div class="brand-sub">Distributed Fleet Telemetry & Billing</div>
             </div>
         </div>
-        <div class="auth-bar" id="auth-bar">
-            <!-- Rendered dynamically -->
-        </div>
+        <div class="auth-bar" id="auth-bar"></div>
     </header>
+
+    <div class="pricing-banner" id="pricing-banner" style="display: none;">
+        <div class="pricing-info">
+            <div class="pricing-title">Тарифный план: <span id="current-plan-name" class="plan-badge plan-free">FREE</span></div>
+            <div class="pricing-desc" id="plan-desc">Бесплатный тариф: до 3 нод. Обновитесь до PRO для неограниченного флота и мгновенных алертов.</div>
+        </div>
+        <button class="btn btn-pro" id="upgrade-btn" onclick="buyPro()">Активировать PRO ($5 / мес)</button>
+    </div>
 
     <div class="onboard-box" id="onboard-box">
         <div class="onboard-title">🚀 Подключить новый сервер за 5 секунд</div>
@@ -139,12 +159,74 @@
     </div>
 
     <footer>
-        NodePulse Platform Engine v1.0.0 • Open Source Cloud Monitoring by NQAI
+        NodePulse Cloud Platform v1.1.0 • CryptoPay Checkout • Developed by NQAI
     </footer>
 
     <script>
         let currentAuth = JSON.parse(localStorage.getItem('np_auth') || 'null');
+        let currentPlan = 'free';
         let isRegisterMode = false;
+
+        async function loadPlan() {
+            if (!currentAuth) {
+                document.getElementById('pricing-banner').style.display = 'none';
+                return;
+            }
+            try {
+                const res = await fetch('/api/v1/billing/plan', {
+                    headers: {'Authorization': 'Bearer ' + currentAuth.token}
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    currentPlan = data.plan;
+                    renderPlanUI();
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function renderPlanUI() {
+            const banner = document.getElementById('pricing-banner');
+            const badge = document.getElementById('current-plan-name');
+            const desc = document.getElementById('plan-desc');
+            const btn = document.getElementById('upgrade-btn');
+
+            banner.style.display = 'flex';
+            if (currentPlan === 'pro') {
+                badge.className = 'plan-badge plan-pro-badge';
+                badge.innerText = 'PRO';
+                desc.innerText = 'PRO план активен: Неограниченный флот, приоритетные алерты и полная история.';
+                btn.style.display = 'none';
+            } else {
+                badge.className = 'plan-badge plan-free';
+                badge.innerText = 'FREE';
+                desc.innerText = 'Бесплатный тариф: до 3 нод. Обновитесь до PRO для расширения лимита.';
+                btn.style.display = 'block';
+            }
+        }
+
+        async function buyPro() {
+            if (!currentAuth) return openModal(false);
+            try {
+                const res = await fetch('/api/v1/billing/create-invoice', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + currentAuth.token,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({plan: 'pro'})
+                });
+                const data = await res.json();
+                if (data.pay_url) {
+                    window.open(data.pay_url, '_blank');
+                } else {
+                    alert('Ошибка генерации счёта: ' + (data.error || 'попробуйте позже'));
+                }
+            } catch (err) {
+                alert('Сетевая ошибка: ' + err.message);
+            }
+        }
 
         function updateAuthUI() {
             const bar = document.getElementById('auth-bar');
@@ -156,12 +238,14 @@
                     <button class="btn" onclick="logout()">Выйти</button>
                 `;
                 installCmd.innerText = `curl -sSL https://pulse.nqai.es-cloud.ru/install.sh?token=${currentAuth.token} | sh`;
+                loadPlan();
             } else {
                 bar.innerHTML = `
                     <button class="btn" onclick="openModal(false)">Войти</button>
                     <button class="btn btn-primary" onclick="openModal(true)">Создать аккаунт</button>
                 `;
                 installCmd.innerText = `curl -sSL https://pulse.nqai.es-cloud.ru/install.sh | sh`;
+                document.getElementById('pricing-banner').style.display = 'none';
             }
         }
 
