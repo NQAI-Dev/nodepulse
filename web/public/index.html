@@ -92,6 +92,33 @@
         .tag-off { color: #f85149; font-weight: 600; }
 
         .sparkline { width: 100%; height: 26px; stroke: var(--blue); stroke-width: 1.5; fill: rgba(56, 139, 253, 0.08); }
+        .sparkline-cpu { stroke: var(--blue); fill: rgba(56, 139, 253, 0.08); }
+        .sparkline-mem { stroke: var(--purple); fill: rgba(163, 113, 247, 0.08); }
+        .sparkline-disk { stroke: var(--orange); fill: rgba(210, 153, 34, 0.08); }
+        .sparkline-load { stroke: var(--green); fill: rgba(46, 160, 67, 0.08); }
+
+        .card { cursor: pointer; transition: transform 0.15s, border-color 0.15s; }
+        .card:hover { border-color: var(--blue); transform: translateY(-1px); }
+
+        .detail-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.78); display: none; align-items: center; justify-content: center; z-index: 200; padding: 1rem; overflow-y: auto; }
+        .detail-panel { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; width: 100%; max-width: 720px; padding: 1.5rem; max-height: 90vh; overflow-y: auto; box-shadow: 0 16px 48px rgba(0,0,0,0.6); }
+        .detail-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; padding-bottom: 0.8rem; border-bottom: 1px solid var(--border); }
+        .detail-title { font-size: 1.1rem; color: var(--text-bright); font-weight: 700; font-family: var(--font-mono); }
+        .detail-close { background: none; border: 1px solid var(--border); color: var(--text); width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 1rem; line-height: 1; }
+        .detail-close:hover { border-color: var(--red); color: var(--red); }
+        .range-tabs { display: flex; gap: 0.4rem; margin-bottom: 1rem; flex-wrap: wrap; }
+        .range-tab { background: var(--surface); border: 1px solid var(--border); color: var(--text-dim); padding: 0.35rem 0.7rem; border-radius: 6px; font-size: 0.75rem; font-family: var(--font-mono); cursor: pointer; }
+        .range-tab:hover { color: var(--text); border-color: var(--blue); }
+        .range-tab.active { color: var(--text-bright); border-color: var(--blue); background: rgba(56, 139, 253, 0.15); }
+        .chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.8rem; margin-bottom: 0.8rem; }
+        .chart-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.4rem; }
+        .chart-name { font-size: 0.72rem; text-transform: uppercase; color: var(--text-dim); font-weight: 700; letter-spacing: 0.5px; }
+        .chart-now { font-size: 0.95rem; font-family: var(--font-mono); color: var(--text-bright); font-weight: 700; }
+        .chart-svg { width: 100%; height: 90px; display: block; }
+        .detail-meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.5rem; margin-top: 0.8rem; }
+        .detail-meta-box { background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.6rem; }
+        .detail-meta-label { font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; font-weight: 600; }
+        .detail-meta-val { font-size: 0.85rem; color: var(--text-bright); font-family: var(--font-mono); font-weight: 600; margin-top: 2px; }
 
         .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 100; padding: 1rem; }
         .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; width: 100%; max-width: 380px; padding: 1.5rem; box-shadow: 0 10px 40px rgba(0,0,0,0.5); }
@@ -432,6 +459,7 @@
 
                 const card = document.createElement('div');
                 card.className = 'card';
+                card.addEventListener('click', () => openDetail(id));
 
                 const servicesHtml = services.length > 0 ? services.slice(0, 6).map(s => `
                     <div class="service-item">
@@ -478,9 +506,103 @@
             }
         }
 
+        let detailState = { nodeID: null, range: '1h', points: [], buckets: [] };
+
+        function openDetail(nodeID) {
+            detailState.nodeID = nodeID;
+            document.getElementById('detail-title').innerText = nodeID;
+            document.getElementById('detail-overlay').style.display = 'flex';
+            loadDetail('1h');
+        }
+        function closeDetail() {
+            document.getElementById('detail-overlay').style.display = 'none';
+            detailState.nodeID = null;
+        }
+        async function loadDetail(range) {
+            if (!detailState.nodeID) return;
+            detailState.range = range;
+            document.querySelectorAll('.range-tab').forEach(t => {
+                t.classList.toggle('active', t.dataset.range === range);
+            });
+            const headers = {};
+            if (currentAuth) headers['Authorization'] = 'Bearer ' + currentAuth.token;
+            try {
+                const res = await fetch('/api/v1/nodes/' + encodeURIComponent(detailState.nodeID) + '/metrics?range=' + range, { headers });
+                if (!res.ok) throw new Error('http ' + res.status);
+                const data = await res.json();
+                const series = (data.points && data.points.length) ? data.points : (data.buckets || []);
+                detailState.points = data.points || [];
+                detailState.buckets = data.buckets || [];
+                renderDetailCharts(series, data);
+            } catch (e) {
+                console.error('detail load', e);
+            }
+        }
+        function renderDetailCharts(series, meta) {
+            const draw = (cls, values, unit) => {
+                if (!values || values.length < 2) return '<div style="color:var(--text-dim);font-size:0.72rem;">Недостаточно данных</div>';
+                const min = Math.min(...values);
+                const max = Math.max(...values) || 1;
+                const range = (max - min) || 1;
+                const w = 640, h = 90;
+                const step = w / (values.length - 1);
+                const pts = values.map((v, i) => `${(i * step).toFixed(1)},${(h - ((v - min) / range) * (h - 8) - 4).toFixed(1)}`).join(' ');
+                return `<svg class="chart-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline class="${cls}" fill="none" stroke-width="1.5" points="${pts}"/></svg>`;
+            };
+            const cpuVals = series.map(p => p.cpu_pct);
+            const loadVals = series.map(p => p.load1);
+            const memVals = series.map(p => p.mem_pct);
+            const diskVals = series.map(p => p.disk_pct);
+            const last = series[series.length - 1] || {};
+            const fmtPct = v => (v || 0).toFixed(1) + '%';
+            const fmtF = v => (v || 0).toFixed(2);
+            document.getElementById('detail-body').innerHTML = `
+                <div class="chart-card">
+                    <div class="chart-head"><span class="chart-name">CPU Usage</span><span class="chart-now">${fmtPct(last.cpu_pct)}</span></div>
+                    ${draw('sparkline-cpu', cpuVals, '%')}
+                </div>
+                <div class="chart-card">
+                    <div class="chart-head"><span class="chart-name">Load Average 1m</span><span class="chart-now">${fmtF(last.load1)}</span></div>
+                    ${draw('sparkline-load', loadVals, '')}
+                </div>
+                <div class="chart-card">
+                    <div class="chart-head"><span class="chart-name">Memory</span><span class="chart-now">${fmtPct(last.mem_pct)}</span></div>
+                    ${draw('sparkline-mem', memVals, '%')}
+                </div>
+                <div class="chart-card">
+                    <div class="chart-head"><span class="chart-name">Disk</span><span class="chart-now">${fmtPct(last.disk_pct)}</span></div>
+                    ${draw('sparkline-disk', diskVals, '%')}
+                </div>
+                <div class="detail-meta">
+                    <div class="detail-meta-box"><div class="detail-meta-label">Range</div><div class="detail-meta-val">${meta.range}</div></div>
+                    <div class="detail-meta-box"><div class="detail-meta-label">Bucket</div><div class="detail-meta-val">${meta.bucket_secs}s</div></div>
+                    <div class="detail-meta-box"><div class="detail-meta-label">Samples</div><div class="detail-meta-val">${series.length}</div></div>
+                    <div class="detail-meta-box"><div class="detail-meta-label">From</div><div class="detail-meta-val">${new Date(meta.from*1000).toLocaleTimeString()}</div></div>
+                    <div class="detail-meta-box"><div class="detail-meta-label">To</div><div class="detail-meta-val">${new Date(meta.to*1000).toLocaleTimeString()}</div></div>
+                </div>
+            `;
+        }
+
         updateAuthUI();
         fetchNodes();
         setInterval(fetchNodes, 3000);
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetail(); });
     </script>
+
+    <div id="detail-overlay" class="detail-overlay" onclick="if(event.target===this)closeDetail()">
+        <div class="detail-panel">
+            <div class="detail-head">
+                <div class="detail-title" id="detail-title">—</div>
+                <button class="detail-close" onclick="closeDetail()">×</button>
+            </div>
+            <div class="range-tabs">
+                <button class="range-tab" data-range="1h" onclick="loadDetail('1h')">1h</button>
+                <button class="range-tab" data-range="6h" onclick="loadDetail('6h')">6h</button>
+                <button class="range-tab" data-range="24h" onclick="loadDetail('24h')">24h</button>
+                <button class="range-tab" data-range="7d" onclick="loadDetail('7d')">7d</button>
+            </div>
+            <div id="detail-body"></div>
+        </div>
+    </div>
 </body>
 </html>
