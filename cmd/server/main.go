@@ -286,6 +286,12 @@ func main() {
 		json.NewEncoder(w).Encode(pStore.GetPublicStatus())
 	})
 
+	mux.HandleFunc("GET /api/v1/public/fleet-summary", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=10")
+		json.NewEncoder(w).Encode(pStore.GetPublicFleetSummary())
+	})
+
 	mux.HandleFunc("GET /api/v1/public/incidents", func(w http.ResponseWriter, r *http.Request) {
 		limit := 50
 		if v := r.URL.Query().Get("limit"); v != "" {
