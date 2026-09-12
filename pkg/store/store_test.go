@@ -34,7 +34,7 @@ func TestPersistentStore(t *testing.T) {
 	}
 	s.Ingest(hb)
 
-	incidents := s.GetActiveIncidents()
+	incidents := s.GetActiveIncidents(1)
 	if len(incidents) == 0 {
 		t.Fatalf("Expected incident triggered for high memory")
 	}
@@ -44,7 +44,7 @@ func TestPersistentStore(t *testing.T) {
 		t.Fatalf("Failed to resolve incident: %v", err)
 	}
 
-	incidentsAfter := s.GetActiveIncidents()
+	incidentsAfter := s.GetActiveIncidents(1)
 	if len(incidentsAfter) != 0 {
 		t.Fatalf("Expected 0 active incidents after resolve, got %d", len(incidentsAfter))
 	}
