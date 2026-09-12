@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -718,6 +719,11 @@ echo "==> [NodePulse] Agent installed and registered successfully as ${NODE_ID}!
 	}
 
 	log.Printf("NodePulse Platform with Billing running on %s", *addr)
+
+	janitorCtx, janitorCancel := context.WithCancel(context.Background())
+	defer janitorCancel()
+	go pStore.RunJanitor(janitorCtx)
+
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
