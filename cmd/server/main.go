@@ -200,6 +200,11 @@ func main() {
 	})
 
 	// 4. Fleet Nodes API
+		mux.HandleFunc("GET /api/v1/public/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(pStore.GetPublicStatus())
+	})
+
 	mux.HandleFunc("GET /api/v1/nodes", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, err := getUser(r)
 		if err != nil {
