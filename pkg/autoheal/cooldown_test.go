@@ -119,6 +119,41 @@ func TestRecordCrashOpensBreakerAfterRepeatedCrashes(t *testing.T) {
 	}
 }
 
+func TestMixedSuccessFailureBreakerIgnoresSuccesses(t *testing.T) {
+	// Regression: a healthy container that occasionally fails should NOT
+	// trip the breaker. Only failures count toward burstLimit; successes
+	// only reset cooldown. Previously the breaker counted every attempt
+	// (success + failure), which tripped it on noisy healthy hosts.
+	b := NewBreaker()
+	b.burstLimit = 3
+	b.cooldown = 0
+	key := "restart_docker:flappy"
+
+	// 5 successes interleaved with 2 failures (under threshold).
+	for i := 0; i < 5; i++ {
+		b.Record(key, nil)
+	}
+	b.Record(key, errStub("boom1"))
+	b.Record(key, nil)
+	b.Record(key, nil)
+	b.Record(key, errStub("boom2"))
+
+	if len(b.opensAt) != 0 {
+		t.Fatalf("breaker must stay closed for 2 failures + many successes, opensAt=%v", b.opensAt)
+	}
+
+	// Two more failures cross the threshold and open the breaker.
+	b.Record(key, errStub("boom3"))
+	b.Record(key, errStub("boom4"))
+	got := b.Allow(key)
+	if got.Allowed {
+		t.Fatalf("breaker should open after 4 failures within window, got %+v", got)
+	}
+	if got.Reason != "circuit_open" {
+		t.Fatalf("expected circuit_open, got %q", got.Reason)
+	}
+}
+
 func TestRecordCrashRespectsCooldownGate(t *testing.T) {
 	b := NewBreaker()
 	b.burstLimit = 3

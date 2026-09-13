@@ -33,6 +33,7 @@ type Breaker struct {
 
 	lastAttempt map[string]time.Time
 	attempts    map[string][]time.Time // recent attempts within burstWindow
+	failures    map[string][]time.Time // recent failures within burstWindow
 	crashes     map[string][]time.Time // recent crash observations within burstWindow (post-restart exited)
 	opensAt     map[string]time.Time   // circuit-open-until timestamp
 }
@@ -45,6 +46,7 @@ func NewBreaker() *Breaker {
 		openFor:     5 * time.Minute,
 		lastAttempt: make(map[string]time.Time),
 		attempts:    make(map[string][]time.Time),
+		failures:    make(map[string][]time.Time),
 		crashes:     make(map[string][]time.Time),
 		opensAt:     make(map[string]time.Time),
 	}
@@ -139,27 +141,33 @@ func (b *Breaker) Record(key string, err error) {
 	now := time.Now()
 	b.lastAttempt[key] = now
 
-	window := b.attempts[key]
+	failures := b.failures[key]
+	if err != nil {
+		failures = append(failures, now)
+	}
 	cutoff := now.Add(-b.burstWindow)
-	out := window[:0]
-	for _, t := range window {
+	out := failures[:0]
+	for _, t := range failures {
 		if t.After(cutoff) {
 			out = append(out, t)
 		}
 	}
-	window = append(out, now)
+	b.failures[key] = out
+
+	window := b.attempts[key]
+	purged := window[:0]
+	for _, t := range window {
+		if t.After(cutoff) {
+			purged = append(purged, t)
+		}
+	}
+	window = append(purged, now)
 	b.attempts[key] = window
 
-	if err != nil {
-		failures := 0
-		for _, t := range window {
-			_ = t
-			failures++
-		}
-		if failures >= b.burstLimit {
-			b.opensAt[key] = now.Add(b.openFor)
-			b.attempts[key] = nil
-		}
+	if len(out) >= b.burstLimit {
+		b.opensAt[key] = now.Add(b.openFor)
+		b.attempts[key] = nil
+		b.failures[key] = nil
 	}
 }
 
@@ -167,6 +175,15 @@ func (b *Breaker) Record(key string, err error) {
 func (b *Breaker) purgeLocked(key string) {
 	now := time.Now()
 	cutoff := now.Add(-b.burstWindow)
+	purge := func(window []time.Time) []time.Time {
+		out := window[:0]
+		for _, t := range window {
+			if t.After(cutoff) {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
 	window := b.attempts[key]
 	out := window[:0]
 	for _, t := range window {
@@ -175,6 +192,8 @@ func (b *Breaker) purgeLocked(key string) {
 		}
 	}
 	b.attempts[key] = out
+	b.failures[key] = purge(b.failures[key])
+	b.crashes[key] = purge(b.crashes[key])
 }
 
 // Key canonicalizes a command like "restart_docker:foo bar" into a
