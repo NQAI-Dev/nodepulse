@@ -1,9 +1,11 @@
 package store
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -400,6 +402,18 @@ func (p *PersistentStore) Alerter() alerter.Notifier { return p.alerter }
 // ponytail: read-only accessor exists so the server can pre-fill settings UI;
 // if the value ever becomes per-user-only, drop this and read from user_settings directly.
 func (p *PersistentStore) DefaultChatID() int64 { return p.defaultChatID }
+
+// Ping verifies the underlying SQLite handle is reachable. Used by the
+// /api/v1/ready endpoint to distinguish liveness (process up, /health)
+// from readiness (DB roundtrip succeeds). Wraps *sql.DB.PingContext so
+// the caller controls the deadline via ctx — a wedged DB doesn't hang
+// the readiness probe forever.
+func (p *PersistentStore) Ping(ctx context.Context) error {
+	if p.db == nil {
+		return errors.New("store: db handle is nil")
+	}
+	return p.db.PingContext(ctx)
+}
 
 // User & Auth methods
 func (p *PersistentStore) Register(username, password string) (int64, string, error) {

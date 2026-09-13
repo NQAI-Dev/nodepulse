@@ -1602,6 +1602,26 @@ echo "==> [NodePulse] Agent installed and registered successfully as ${NODE_ID}!
 		w.Write([]byte(`{"status":"ok","system":"nodepulse-platform"}` + "\n"))
 	})
 
+	// /api/v1/ready is the readiness probe: returns 200 only if the DB
+	// roundtrips within the 2s deadline. Stays separate from /health so
+	// load balancers can use /health for liveness (process up, always
+	// cheap) and /api/v1/ready for readiness (deps healthy, drop from
+	// pool if SQLite is wedged). Cheap enough for a sub-second LB poll.
+	mux.HandleFunc("GET /api/v1/ready", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := pStore.Ping(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{
+				"status": "not_ready",
+				"reason": err.Error(),
+			})
+			return
+		}
+		w.Write([]byte(`{"status":"ready","checks":{"db":"ok"}}` + "\n"))
+	})
+
 	mux.Handle("/", http.FileServer(http.Dir("web/public")))
 
 	server := &http.Server{
