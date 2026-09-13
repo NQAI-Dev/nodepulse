@@ -440,6 +440,20 @@ func main() {
 		})
 	})
 
+	mux.HandleFunc("GET /api/v1/public/maintenance", func(w http.ResponseWriter, r *http.Request) {
+		notices, err := pStore.GetPublicMaintenanceWindows()
+		if err != nil {
+			http.Error(w, `{"error":"maintenance query failed"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=30")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"items": notices,
+			"count": len(notices),
+		})
+	})
+
 	mux.HandleFunc("GET /api/v1/public/nodes", func(w http.ResponseWriter, r *http.Request) {
 		tag := r.URL.Query().Get("tag")
 		w.Header().Set("Content-Type", "application/json")
