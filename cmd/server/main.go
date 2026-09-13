@@ -313,33 +313,7 @@ func main() {
 	})
 
 	mux.HandleFunc("POST /api/v1/autoheal/log", func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get("X-NodePulse-Token")
-		if token == "" {
-			token = r.URL.Query().Get("token")
-		}
-		uid, _, err := pStore.GetUserByToken(token)
-		if err != nil && !pStore.IsMasterToken(token) {
-			http.Error(w, `{"error":"unauthorized node token"}`, http.StatusUnauthorized)
-			return
-		}
-
-		var payload struct {
-			NodeID string                  `json:"node_id"`
-			Events []protocol.AutoHealLog  `json:"events"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.NodeID == "" {
-			http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
-			return
-		}
-
-		if err := pStore.RecordAutoHealLogs(payload.NodeID, uid, payload.Events); err != nil {
-			log.Printf("[autoheal] %v", err)
-			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]bool{"accepted": true})
+		handleAutohealLog(w, r, pStore)
 	})
 
 	mux.HandleFunc("GET /api/v1/autoheal/logs", func(w http.ResponseWriter, r *http.Request) {
@@ -1743,4 +1717,43 @@ func handleHeartbeatIngest(w http.ResponseWriter, r *http.Request, pStore *store
 		Acknowledged: true,
 		Commands:     commands,
 	})
+}
+
+// handleAutohealLog validates an agent's autoheal log batch and persists it
+// via pStore.RecordAutoHealLogs. Handler body lives in file scope so the
+// schema-drift failure path can be unit-tested without the full mux.
+// Mirrors the handleHeartbeatIngest extraction pattern.
+func handleAutohealLog(w http.ResponseWriter, r *http.Request, pStore *store.PersistentStore) {
+	token := r.Header.Get("X-NodePulse-Token")
+	if token == "" {
+		token = r.URL.Query().Get("token")
+	}
+	uid, _, err := pStore.GetUserByToken(token)
+	if err != nil && !pStore.IsMasterToken(token) {
+		http.Error(w, `{"error":"unauthorized node token"}`, http.StatusUnauthorized)
+		return
+	}
+
+	var payload struct {
+		NodeID string                 `json:"node_id"`
+		Events []protocol.AutoHealLog `json:"events"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.NodeID == "" {
+		http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	// RecordAutoHealLogs was made error-returning in b6842be; failure
+	// here MUST surface as 500, not a silent swallowed error. The same
+	// silent-p.db.Exec class that masked the 2026-09-13 ~19:30 UTC prod
+	// incident has been closed across all known pkg/store sites; this
+	// handler preserves the contract.
+	if err := pStore.RecordAutoHealLogs(payload.NodeID, uid, payload.Events); err != nil {
+		log.Printf("[autoheal] record logs node=%q uid=%d failed: %v", payload.NodeID, uid, err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"accepted": true})
 }

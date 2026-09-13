@@ -177,3 +177,81 @@ func TestHeartbeatIngest_BindNodeFailure(t *testing.T) {
 	// — pre-fix the handler would have returned 200 with ok:true and the
 	// node_owners row would simply not exist.
 }
+
+// TestAutohealLog_RecordAutoHealLogsFailure pins the b6842be fix at the
+// HTTP boundary for the autoheal log endpoint. Drops autoheal_logs to
+// simulate schema drift (the exact failure class that the silent-p.db.Exec
+// anti-pattern used to mask), then sends a valid payload with a non-master
+// token and asserts the handler surfaces 500 + 'internal error' instead of
+// silently returning {accepted:true}.
+//
+// Regression guard for 2026-09-13 ~19:30 UTC prod incident class — if
+// this test ever fails, RecordAutoHealLogs has been silently broken again
+// from the HTTP entry point's perspective.
+func TestAutohealLog_RecordAutoHealLogsFailure(t *testing.T) {
+	dbPath := "/tmp/test_autoheal_log_failure.db"
+	os.Remove(dbPath)
+	defer os.Remove(dbPath)
+
+	pStore, err := store.NewPersistentStore(dbPath, "", 0)
+	if err != nil {
+		t.Fatalf("NewPersistentStore: %v", err)
+	}
+
+	// Register a real user so the autoheal log batch is authenticated
+	// against a non-master token. A master token would still exercise the
+	// RecordAutoHealLogs branch, but using a regular user mirrors the
+	// normal agent ingest flow more closely.
+	uid, token, err := pStore.Register("bob", "secret456")
+	if err != nil {
+		t.Fatalf("Register bob: %v", err)
+	}
+	if uid == 0 || token == "" {
+		t.Fatalf("Register returned zero values (uid=%d token=%q)", uid, token)
+	}
+
+	// Now force RecordAutoHealLogs to fail by dropping its table.
+	// Production equivalent: schema drift, partial migration, operator
+	// action. tx.Prepare on a missing table returns SQLITE_ERROR →
+	// RecordAutoHealLogs surfaces it as an error → handler must 500.
+	if _, err := pStore.DB().Exec("DROP TABLE autoheal_logs"); err != nil {
+		t.Fatalf("drop autoheal_logs: %v", err)
+	}
+
+	payload := map[string]interface{}{
+		"node_id": "test-node-02",
+		"events": []protocol.AutoHealLog{
+			{
+				Command: "systemctl restart myapp",
+				Status:  "ok",
+				Reason:  "high_cpu",
+				Ts:      1700000000,
+			},
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/api/v1/autoheal/log", strings.NewReader(string(body)))
+	req.Header.Set("X-NodePulse-Token", token)
+	w := httptest.NewRecorder()
+
+	handleAutohealLog(w, req, pStore)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d, want 500; body=%q", w.Code, w.Body.String())
+	}
+	respBody := w.Body.String()
+	if !strings.Contains(respBody, "internal error") {
+		t.Fatalf("response must contain 'internal error' guidance, got %q", respBody)
+	}
+	// Defence in depth: the handler must NEVER have returned {accepted:true}.
+	// Pre-fix (b6842be) the discarded-error swallow would have replied
+	// 200 + {"accepted":true}, leaving the agent believing the events
+	// were persisted when no INSERT ever happened.
+	if strings.Contains(respBody, `"accepted":true`) {
+		t.Fatalf("handler silently accepted autoheal logs after backend failure: %q", respBody)
+	}
+}
