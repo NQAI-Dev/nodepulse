@@ -696,6 +696,19 @@ func (p *PersistentStore) Ping(ctx context.Context) error {
 }
 
 // User & Auth methods
+//
+// The Register / RegisterByTelegram / Authenticate family used to discard the
+// error from every p.db.Exec and p.db.QueryRow call after the first one,
+// silently masking schema mismatches and constraint failures. The most
+// expensive example of that pattern was the 2026-09-13 ~19:30 UTC prod
+// incident where every api_tokens INSERT silently failed on the legacy
+// `owner TEXT NOT NULL` column (see migrateAPITokensSchema for the full
+// chronology) — users got a valid-looking token back from Register but
+// the row never landed, so the next ValidateToken rejected it and the
+// user couldn't do anything. To stop that bug class from recurring we
+// now check every INSERT/UPDATE error in these paths and surface it
+// through the function's existing error return; the HTTP handlers in
+// cmd/server/main.go already turn non-nil errors into 5xx responses.
 func (p *PersistentStore) Register(username, password string) (int64, string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -706,10 +719,14 @@ func (p *PersistentStore) Register(username, password string) (int64, string, er
 		return 0, "", fmt.Errorf("username already exists")
 	}
 	uid, _ := res.LastInsertId()
-	p.db.Exec("INSERT INTO user_settings (user_id) VALUES (?)", uid)
+	if _, err := p.db.Exec("INSERT INTO user_settings (user_id) VALUES (?)", uid); err != nil {
+		return 0, "", fmt.Errorf("create user_settings for uid=%d: %w", uid, err)
+	}
 
 	token := fmt.Sprintf("np_%s_%x", username, sha256.Sum256([]byte(fmt.Sprintf("%d-%s", time.Now().UnixNano(), username))))[:36]
-	p.db.Exec("INSERT INTO api_tokens (token, user_id, name) VALUES (?, ?, 'default')", token, uid)
+	if _, err := p.db.Exec("INSERT INTO api_tokens (token, user_id, name) VALUES (?, ?, 'default')", token, uid); err != nil {
+		return 0, "", fmt.Errorf("issue default token for uid=%d: %w", uid, err)
+	}
 
 	return uid, token, nil
 }
@@ -730,11 +747,15 @@ func (p *PersistentStore) RegisterByTelegram(tgID int64, firstName, username str
 		// Issue a fresh token so a previous device's session can't outlive the
 		// new login window.
 		if firstName != "" || username != "" {
-			p.db.Exec("UPDATE telegram_users SET tg_first_name = ?, tg_username = ? WHERE tg_id = ?",
-				firstName, username, tgID)
+			if _, err := p.db.Exec("UPDATE telegram_users SET tg_first_name = ?, tg_username = ? WHERE tg_id = ?",
+				firstName, username, tgID); err != nil {
+				return 0, "", fmt.Errorf("refresh telegram profile for tg_id=%d: %w", tgID, err)
+			}
 		}
 		token := fmt.Sprintf("np_tg_%x", sha256.Sum256([]byte(fmt.Sprintf("%d-%d", tgID, time.Now().UnixNano()))))[:36]
-		p.db.Exec("INSERT INTO api_tokens (token, user_id, name) VALUES (?, ?, 'tg-login')", token, uid)
+		if _, err := p.db.Exec("INSERT INTO api_tokens (token, user_id, name) VALUES (?, ?, 'tg-login')", token, uid); err != nil {
+			return 0, "", fmt.Errorf("issue tg-login token for tg_id=%d uid=%d: %w", tgID, uid, err)
+		}
 		return uid, token, nil
 	}
 
@@ -747,12 +768,18 @@ func (p *PersistentStore) RegisterByTelegram(tgID int64, firstName, username str
 		return 0, "", fmt.Errorf("username already exists")
 	}
 	uid, _ = res.LastInsertId()
-	p.db.Exec("INSERT INTO user_settings (user_id) VALUES (?)", uid)
-	p.db.Exec("INSERT INTO telegram_users (tg_id, user_id, tg_username, tg_first_name) VALUES (?, ?, ?, ?)",
-		tgID, uid, username, firstName)
+	if _, err := p.db.Exec("INSERT INTO user_settings (user_id) VALUES (?)", uid); err != nil {
+		return 0, "", fmt.Errorf("create user_settings for tg_id=%d uid=%d: %w", tgID, uid, err)
+	}
+	if _, err := p.db.Exec("INSERT INTO telegram_users (tg_id, user_id, tg_username, tg_first_name) VALUES (?, ?, ?, ?)",
+		tgID, uid, username, firstName); err != nil {
+		return 0, "", fmt.Errorf("link telegram_users for tg_id=%d uid=%d: %w", tgID, uid, err)
+	}
 
 	token := fmt.Sprintf("np_tg_%x", sha256.Sum256([]byte(fmt.Sprintf("%d-%d", tgID, time.Now().UnixNano()))))[:36]
-	p.db.Exec("INSERT INTO api_tokens (token, user_id, name) VALUES (?, ?, 'tg-login')", token, uid)
+	if _, err := p.db.Exec("INSERT INTO api_tokens (token, user_id, name) VALUES (?, ?, 'tg-login')", token, uid); err != nil {
+		return 0, "", fmt.Errorf("issue tg-login token for tg_id=%d uid=%d: %w", tgID, uid, err)
+	}
 	return uid, token, nil
 }
 
@@ -768,7 +795,9 @@ func (p *PersistentStore) Authenticate(username, password string) (int64, string
 	err = p.db.QueryRow("SELECT token FROM api_tokens WHERE user_id = ? ORDER BY created_at ASC LIMIT 1", uid).Scan(&token)
 	if err != nil {
 		token = fmt.Sprintf("np_%s_%x", username, sha256.Sum256([]byte(fmt.Sprintf("%d-%s", time.Now().UnixNano(), username))))[:36]
-		p.db.Exec("INSERT INTO api_tokens (token, user_id, name) VALUES (?, ?, 'default')", token, uid)
+		if _, err := p.db.Exec("INSERT INTO api_tokens (token, user_id, name) VALUES (?, ?, 'default')", token, uid); err != nil {
+			return 0, "", fmt.Errorf("issue default token for uid=%d: %w", uid, err)
+		}
 	}
 
 	return uid, token, nil
