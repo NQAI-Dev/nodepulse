@@ -121,6 +121,24 @@ func (r *WebhookRecorder) Dispatch(userID, incidentID int64, url string, event p
 	return r.dispatchWithMetadata(userID, incidentID, url, "", event)
 }
 
+// SendTestWebhook signs and delivers a clearly-labelled test payload. The
+// audit row gets a synthetic incident_id "test" so operators can spot it in
+// the deliveries dashboard without confusing it with a real incident.
+func (r *WebhookRecorder) SendTestWebhook(userID int64, url, secret string) error {
+	event := protocol.WebhookAlert{
+		Event:     "test",
+		Timestamp: time.Now().Unix(),
+		Incident: &protocol.Incident{
+			Severity:  "info",
+			NodeID:    "test",
+			Title:     "NodePulse test webhook",
+			Detail:    "This is a test delivery — your webhook endpoint works.",
+			StartedAt: time.Now().Unix(),
+		},
+	}
+	return r.dispatchWithMetadata(userID, 0, url, secret, event)
+}
+
 func (r *WebhookRecorder) dispatchWithMetadata(userID, incidentID int64, url, secret string, event protocol.WebhookAlert) error {
 	if url == "" {
 		// Empty URL is a config miss, not a delivery. Skip the audit row so

@@ -126,6 +126,41 @@ func (d *Dispatcher) GetChatID() int64 {
 	return d.chatID
 }
 
+// SendTestAlert sends a clearly-marked test message to chatID so operators
+// can verify their Telegram wiring without waiting for a real incident.
+// Returns nil when api.telegram.org responds 2xx, or the underlying error
+// otherwise. Caller decides how to surface the result to the UI.
+func (d *Dispatcher) SendTestAlert(chatID int64) error {
+	if d.botToken == "" {
+		return fmt.Errorf("telegram bot token not configured")
+	}
+	if chatID == 0 {
+		return fmt.Errorf("telegram chat id is empty")
+	}
+	text := fmt.Sprintf("🧪 <b>[NodePulse Test Alert]</b>\n\n"+
+		"Это тестовое уведомление — настройки Telegram работают корректно.\n"+
+		"<b>Time:</b> %s",
+		time.Now().Format("2006-01-02 15:04:05 UTC"))
+	payload, _ := json.Marshal(map[string]interface{}{
+		"chat_id":    chatID,
+		"text":       text,
+		"parse_mode": "HTML",
+	})
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", d.botToken)
+	resp, err := d.client.Post(url, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("telegram sendMessage: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("telegram sendMessage: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// BotToken exposes the configured bot token (read-only).
+func (d *Dispatcher) BotToken() string { return d.botToken }
+
 // NotifyResolvedTo sends a recovery message for an auto-resolved incident.
 func (d *Dispatcher) NotifyResolvedTo(chatID int64, nodeID, severity, title string) {
 	if d.botToken == "" || chatID == 0 {

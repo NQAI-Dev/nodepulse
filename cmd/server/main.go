@@ -632,6 +632,97 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]bool{"success": true})
 	})
 
+	// Test-settings endpoint: fires a real Telegram message and/or signed
+	// webhook using the user's saved config so they can verify wiring
+	// without waiting for an actual incident. Body fields are optional and
+	// let the UI override the saved target for one-off tests (e.g. forward
+	// to a second channel); only the secret is required to be the saved one
+	// when supplied (so a forged chat_id can't leak the real secret).
+	mux.HandleFunc("POST /api/v1/settings/test", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		var req struct {
+			Channel   string `json:"channel"` // "telegram", "webhook", or "all"
+			ChatID    string `json:"chat_id"`
+			WebhookURL string `json:"webhook_url"`
+			WebhookSecret string `json:"webhook_secret"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		channel := req.Channel
+		if channel == "" {
+			channel = "all"
+		}
+
+		settings, err := pStore.GetSettings(uid)
+		if err != nil {
+			http.Error(w, `{"error":"failed to fetch settings"}`, http.StatusInternalServerError)
+			return
+		}
+
+		type channelResult struct {
+			Channel string `json:"channel"`
+			OK      bool   `json:"ok"`
+			Error   string `json:"error,omitempty"`
+		}
+		var results []channelResult
+
+		if channel == "telegram" || channel == "all" {
+			chatID := req.ChatID
+			if chatID == "" {
+				chatID = settings.TelegramChatID
+			}
+			var cid int64
+			if chatID != "" {
+				cid, _ = strconv.ParseInt(chatID, 10, 64)
+			}
+			if disp, ok := pStore.Alerter().(*alerter.Dispatcher); ok {
+				if disp.BotToken() == "" {
+					results = append(results, channelResult{Channel: "telegram", OK: false, Error: "telegram bot not configured on server"})
+				} else if err := disp.SendTestAlert(cid); err != nil {
+					results = append(results, channelResult{Channel: "telegram", OK: false, Error: err.Error()})
+				} else {
+					results = append(results, channelResult{Channel: "telegram", OK: true})
+				}
+			} else {
+				results = append(results, channelResult{Channel: "telegram", OK: false, Error: "alerter dispatcher unavailable"})
+			}
+		}
+
+		if channel == "webhook" || channel == "all" {
+			url := req.WebhookURL
+			secret := req.WebhookSecret
+			if url == "" {
+				url = settings.WebhookURL
+				secret = settings.WebhookSecret
+			}
+			if url == "" {
+				results = append(results, channelResult{Channel: "webhook", OK: false, Error: "webhook URL is empty"})
+			} else if err := pStore.Recorder().SendTestWebhook(uid, url, secret); err != nil {
+				results = append(results, channelResult{Channel: "webhook", OK: false, Error: err.Error()})
+			} else {
+				results = append(results, channelResult{Channel: "webhook", OK: true})
+			}
+		}
+
+		anyOK := false
+		for _, r := range results {
+			if r.OK {
+				anyOK = true
+				break
+			}
+		}
+		status := http.StatusOK
+		if !anyOK && len(results) > 0 {
+			status = http.StatusBadGateway
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]interface{}{"results": results})
+	})
+
 	// 6. Incidents API
 	mux.HandleFunc("GET /api/v1/incidents", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, err := getUser(r)
