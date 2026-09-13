@@ -15,7 +15,12 @@ import (
 // "container absent from services" resolution path never fires. After
 // this window the incident is auto-resolved as "abandoned" so the public
 // status page stops reporting outage.
-const abandonedContainerTTL = 24 * time.Hour
+//
+// 30m is enough for a normal docker restart cycle (autoheal, systemd
+// Restart=on-failure, manual `docker start`). Anything still stopped after
+// that is either intentional or already broken; either way the operator
+// doesn't want the public status pinned at "outage" indefinitely.
+const abandonedContainerTTL = 30 * time.Minute
 
 // ResolveStaleIncidents marks open incidents as resolved when their condition
 // is no longer present in the latest heartbeat. Sends a resolution notification
@@ -59,6 +64,44 @@ func (p *PersistentStore) ResolveStaleIncidents(hb *protocol.Heartbeat) {
 		}
 		p.markResolvedAndNotify(inc.id, hb.NodeID, inc.severity, inc.title, reason)
 	}
+}
+
+// ResolveAbandonedAcrossFleet sweeps every open container-stopped incident
+// older than abandonedContainerTTL even when its node hasn't shipped a fresh
+// heartbeat. The per-heartbeat ResolveStaleIncidents only sees rows for nodes
+// that are still alive; a node that has been silent for days otherwise pins
+// the incident open forever.
+func (p *PersistentStore) ResolveAbandonedAcrossFleet() int {
+	if p == nil || p.db == nil {
+		return 0
+	}
+	cutoff := time.Now().Add(-abandonedContainerTTL).Unix()
+	rows, err := p.db.Query(
+		"SELECT id, node_id, severity, title FROM incidents WHERE resolved = 0 AND started_at > 0 AND started_at < ?",
+		cutoff,
+	)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+
+	type row struct {
+		id       int64
+		nodeID   string
+		severity string
+		title    string
+	}
+	var stale []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.nodeID, &r.severity, &r.title); err == nil {
+			stale = append(stale, r)
+		}
+	}
+	for _, r := range stale {
+		p.markResolvedAndNotify(r.id, r.nodeID, r.severity, r.title, "auto:abandoned_ttl")
+	}
+	return len(stale)
 }
 
 // incidentResolutionReason returns a non-empty tag when the heartbeat no

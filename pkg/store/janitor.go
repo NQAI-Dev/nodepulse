@@ -54,6 +54,15 @@ func (p *PersistentStore) runJanitorPass() {
 	if p == nil || p.db == nil {
 		return
 	}
+
+	// Sweep abandoned container-stopped incidents older than
+	// abandonedContainerTTL even when the node is silent. Per-heartbeat
+	// resolution only sees rows for live nodes, so without this a silent
+	// node pins the public status at "outage" forever.
+	if n := p.ResolveAbandonedAcrossFleet(); n > 0 {
+		log.Printf("[janitor] auto-resolved %d abandoned incidents", n)
+	}
+
 	cutoff := time.Now().Add(-incidentRetentionDays * 24 * time.Hour).Unix()
 
 	// Resolved incidents older than the retention window.
