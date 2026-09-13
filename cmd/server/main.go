@@ -374,6 +374,30 @@ func main() {
 	mux.HandleFunc("GET /status/feed.atom", renderFeed)
 	mux.HandleFunc("GET /feed.atom", renderFeed)
 
+	renderRss := func(w http.ResponseWriter, r *http.Request) {
+		items, err := pStore.GetPublicIncidentHistory(0, 50)
+		if err != nil {
+			http.Error(w, "feed fetch failed", http.StatusInternalServerError)
+			return
+		}
+		scheme := "https"
+		if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" && r.Host != "pulse.nqai.es-cloud.ru" {
+			scheme = "http"
+		}
+		baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
+		rssBytes, err := store.RenderRSSFeed(baseURL, "NodePulse System Status", items)
+		if err != nil {
+			http.Error(w, "feed encoding failed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		w.Write(rssBytes)
+	}
+	mux.HandleFunc("GET /api/v1/public/feed.rss", renderRss)
+	mux.HandleFunc("GET /status/feed.rss", renderRss)
+	mux.HandleFunc("GET /feed.rss", renderRss)
+
 	mux.HandleFunc("GET /api/v1/public/badge", func(w http.ResponseWriter, r *http.Request) {
 		label := r.URL.Query().Get("label")
 		if label == "" {
