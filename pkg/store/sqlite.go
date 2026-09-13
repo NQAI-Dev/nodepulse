@@ -227,6 +227,77 @@ func migrateAPITokensSchema(db *sql.DB) error {
 	return nil
 }
 
+// tableColumns returns the set of column names that exist on the given
+// table. Used by every migrateXxxSchema function below to gate ALTER
+// TABLE statements on actual schema state (instead of the
+// silent-Exec-and-discard-the-error anti-pattern that masked the
+// 2026-09-13 ~19:30 prod incident).
+func tableColumns(db *sql.DB, table string) (map[string]struct{}, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil, fmt.Errorf("pragma table_info(%s): %w", table, err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return nil, fmt.Errorf("scan table_info(%s) row: %w", table, err)
+		}
+		out[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate table_info(%s): %w", table, err)
+	}
+	return out, nil
+}
+
+// migrateTenantSchema adds a `tenant_id INTEGER DEFAULT 1` column to
+// users, node_owners, and incidents. This is purely schema-prep for
+// future multi-tenant filtering — no code reads tenant_id yet, so the
+// migration has zero behavioural effect. Existing rows auto-backfill
+// to tenant_id=1 via the column DEFAULT (SQLite ADD COLUMN with
+// DEFAULT populates existing rows since 3.31 / Jan 2020; VDS has
+// 3.46.1). Fresh installs get the column inline via the CREATE TABLE
+// statements at the top of NewPersistentStore.
+//
+// Why now: the operator-side invites flow (commits 1de51a7/a8e25ad/
+// ac2cd56/14d49ef) binds a Telegram chat to a user_id and we want to
+// eventually support multi-tenant filtering ("WHERE tenant_id = ?") at
+// every read site that touches users / node_owners / incidents. Adding
+// the column with DEFAULT 1 means existing prod data is already
+// correctly attributed to the default tenant once this ships, and
+// future filter clauses can be added incrementally without a
+// follow-up migration. This matches the same "add column with
+// default, then code, then backfill" pattern used for billing.plan
+// and the api_tokens schema work.
+//
+// Each step is idempotent (PRAGMA check first). Each step surfaces
+// its own error so a failure points at the exact table that broke.
+func migrateTenantSchema(db *sql.DB) error {
+	tables := []string{"users", "node_owners", "incidents"}
+	for _, table := range tables {
+		cols, err := tableColumns(db, table)
+		if err != nil {
+			return err
+		}
+		if _, hasTenant := cols["tenant_id"]; hasTenant {
+			continue // already migrated; no-op
+		}
+		if _, err := db.Exec(
+			fmt.Sprintf("ALTER TABLE %s ADD COLUMN tenant_id INTEGER DEFAULT 1", table),
+		); err != nil {
+			return fmt.Errorf("migrate %s: add tenant_id: %w", table, err)
+		}
+		log.Printf("[nodepulse] added tenant_id column to %s", table)
+	}
+	return nil
+}
+
 // ensureMasterToken guarantees a single api_tokens row with name='master'
 // exists for adminID. Three branches:
 //
@@ -336,7 +407,8 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		username TEXT UNIQUE NOT NULL,
 		password_hash TEXT NOT NULL,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		tenant_id INTEGER DEFAULT 1
 	);
 
 	CREATE TABLE IF NOT EXISTS user_settings (
@@ -362,6 +434,7 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	CREATE TABLE IF NOT EXISTS node_owners (
 		node_id TEXT PRIMARY KEY,
 		user_id INTEGER NOT NULL,
+		tenant_id INTEGER DEFAULT 1,
 		FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 	);
 
@@ -385,7 +458,8 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		resolved_at INTEGER DEFAULT 0,
 		last_notified_at INTEGER DEFAULT 0,
 		acknowledged_at INTEGER DEFAULT 0,
-		resolution_reason TEXT DEFAULT ''
+		resolution_reason TEXT DEFAULT '',
+		tenant_id INTEGER DEFAULT 1
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_incidents_node ON incidents(node_id, resolved);
@@ -558,6 +632,13 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	// the full rationale.
 	if err := migrateAPITokensSchema(db); err != nil {
 		return nil, fmt.Errorf("migrate api_tokens: %w", err)
+	}
+
+	// tenant_id prep for future multi-tenant filtering. See
+	// migrateTenantSchema for the rationale. Pure schema prep, zero
+	// behavioural change; idempotent across restarts.
+	if err := migrateTenantSchema(db); err != nil {
+		return nil, fmt.Errorf("migrate tenant_id: %w", err)
 	}
 
 	// Ensure a master admin token row exists in api_tokens. The cached
