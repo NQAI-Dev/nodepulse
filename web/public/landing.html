@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NodePulse — облачный мониторинг серверов и контейнеров</title>
+    <meta name="description" content="Agent-based мониторинг серверов, Docker и веб-сервисов. Мгновенные алерты в Telegram, Discord, Slack. Бесплатный тариф, оплата картой РФ и Telegram Stars.">
+    <meta property="og:title" content="NodePulse — мониторинг, который видит реальные проблемы">
+    <meta property="og:description" content="Узнай о падении за секунды, а не через 5 минут. HTTP, TCP, TLS, DNS, ICMP probes. Open-source агент.">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E">
+    <script async src="https://telegram.org/js/telegram-widget.js?22" data-telegram-login="nodepulse_mon_bot" data-size="large" data-auth-url="/api/v1/tg-callback" data-request-access="write"></script>
+    <style>
+        :root {
+            --bg: #090d13;
+            --surface: #111722;
+            --surface-elevated: #161f2e;
+            --border: #212d3d;
+            --text-dim: #7d8b99;
+            --text: #c5d1de;
+            --text-bright: #ffffff;
+            --blue: #388bfd;
+            --blue-glow: rgba(56, 139, 253, 0.25);
+            --green: #2ea043;
+            --red: #da3633;
+            --orange: #d29922;
+            --purple: #a371f7;
+            --telegram: #2aabee;
+            --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+        }
+        a { color: var(--blue); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        code { font-family: var(--font-mono); font-size: 0.9em; background: var(--surface); padding: 2px 6px; border-radius: 4px; color: #79c0ff; }
+
+        .nav {
+            position: sticky; top: 0; z-index: 50;
+            background: rgba(9, 13, 19, 0.85);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+            padding: 1rem 2rem;
+            display: flex; align-items: center; justify-content: space-between;
+            max-width: 1200px; margin: 0 auto;
+        }
+        .nav-brand { display: flex; align-items: center; gap: 0.6rem; font-weight: 700; font-size: 1.1rem; color: var(--text-bright); }
+        .nav-brand-icon {
+            width: 32px; height: 32px; min-width: 32px;
+            background: linear-gradient(135deg, #1f6feb, #58a6ff);
+            border-radius: 7px; display: flex; align-items: center; justify-content: center;
+            font-size: 1.1rem; box-shadow: 0 0 12px var(--blue-glow);
+        }
+        .nav-links { display: flex; gap: 1.5rem; align-items: center; }
+        .nav-links a { color: var(--text-dim); font-size: 0.9rem; }
+        .nav-links a:hover { color: var(--text-bright); text-decoration: none; }
+        @media (max-width: 640px) {
+            .nav { padding: 0.8rem 1rem; }
+            .nav-links { gap: 1rem; font-size: 0.85rem; }
+            .nav-links a:not(.btn) { display: none; }
+        }
+
+        .btn {
+            display: inline-block;
+            background: var(--surface-elevated);
+            border: 1px solid var(--border);
+            color: var(--text-bright);
+            padding: 0.6rem 1.2rem;
+            border-radius: 7px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+            text-decoration: none;
+        }
+        .btn:hover { border-color: var(--blue); text-decoration: none; }
+        .btn-primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+        .btn-primary:hover { background: #1f6feb; border-color: #1f6feb; }
+        .btn-telegram { background: var(--telegram); border-color: var(--telegram); color: #fff; }
+        .btn-telegram:hover { background: #229ed9; border-color: #229ed9; }
+        .btn-lg { padding: 0.85rem 1.8rem; font-size: 1rem; }
+
+        .container { max-width: 1200px; margin: 0 auto; padding: 0 2rem; }
+        @media (max-width: 640px) { .container { padding: 0 1rem; } }
+
+        /* Hero */
+        .hero {
+            padding: 6rem 0 4rem;
+            text-align: center;
+            background: radial-gradient(ellipse at top, rgba(56, 139, 253, 0.12), transparent 60%);
+        }
+        .hero-badge {
+            display: inline-block;
+            background: rgba(56, 139, 253, 0.15);
+            border: 1px solid rgba(56, 139, 253, 0.4);
+            color: #79c0ff;
+            padding: 0.35rem 0.9rem;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+        }
+        .hero h1 {
+            font-size: clamp(2rem, 5vw, 3.5rem);
+            font-weight: 800;
+            line-height: 1.1;
+            color: var(--text-bright);
+            margin-bottom: 1.25rem;
+            letter-spacing: -0.02em;
+        }
+        .hero h1 .gradient {
+            background: linear-gradient(135deg, #58a6ff, #a371f7);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .hero p {
+            font-size: 1.15rem;
+            color: var(--text-dim);
+            max-width: 640px;
+            margin: 0 auto 2.5rem;
+        }
+        .hero-cta { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+        .hero-trust {
+            margin-top: 2.5rem;
+            display: flex; gap: 1.5rem; justify-content: center; flex-wrap: wrap;
+            font-size: 0.85rem; color: var(--text-dim);
+        }
+        .hero-trust span::before {
+            content: "✓"; color: var(--green); font-weight: 700; margin-right: 0.4rem;
+        }
+
+        /* Features */
+        .features { padding: 4rem 0; }
+        .section-title {
+            text-align: center;
+            font-size: clamp(1.5rem, 3vw, 2rem);
+            color: var(--text-bright);
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            letter-spacing: -0.01em;
+        }
+        .section-sub {
+            text-align: center;
+            color: var(--text-dim);
+            margin-bottom: 3rem;
+            max-width: 560px; margin-left: auto; margin-right: auto;
+        }
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.25rem;
+        }
+        .feature {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.5rem;
+            transition: all 0.2s;
+        }
+        .feature:hover { border-color: var(--blue); transform: translateY(-2px); }
+        .feature-icon {
+            width: 40px; height: 40px;
+            background: rgba(56, 139, 253, 0.15);
+            border-radius: 8px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 1.3rem;
+            margin-bottom: 1rem;
+        }
+        .feature h3 {
+            color: var(--text-bright);
+            font-size: 1.05rem;
+            margin-bottom: 0.4rem;
+            font-weight: 700;
+        }
+        .feature p { font-size: 0.9rem; color: var(--text-dim); }
+
+        /* Pricing */
+        .pricing { padding: 4rem 0; background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+        .pricing-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1.25rem;
+            max-width: 1000px; margin: 0 auto;
+        }
+        .plan {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2rem 1.5rem;
+            position: relative;
+            display: flex; flex-direction: column;
+        }
+        .plan.featured { border-color: var(--purple); box-shadow: 0 0 24px rgba(163, 113, 247, 0.2); }
+        .plan-badge {
+            position: absolute; top: -10px; right: 20px;
+            background: linear-gradient(135deg, #8a2be2, #a371f7);
+            color: #fff; font-size: 0.7rem; font-weight: 700;
+            padding: 4px 10px; border-radius: 999px;
+        }
+        .plan-name { font-size: 0.85rem; color: var(--text-dim); text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
+        .plan-price { font-size: 2.25rem; color: var(--text-bright); font-weight: 800; margin-bottom: 0.25rem; }
+        .plan-price .per { font-size: 0.95rem; color: var(--text-dim); font-weight: 400; }
+        .plan-desc { font-size: 0.85rem; color: var(--text-dim); margin-bottom: 1.5rem; }
+        .plan-features { list-style: none; margin-bottom: 1.5rem; flex-grow: 1; }
+        .plan-features li {
+            padding: 0.4rem 0; font-size: 0.9rem; color: var(--text);
+            display: flex; gap: 0.6rem; align-items: start;
+        }
+        .plan-features li::before {
+            content: "✓"; color: var(--green); font-weight: 700; flex-shrink: 0;
+        }
+        .plan-features li.no { color: var(--text-dim); }
+        .plan-features li.no::before { content: "×"; color: var(--text-dim); }
+        .plan-cta { text-align: center; margin-top: auto; }
+
+        /* CTA / Signup */
+        .signup {
+            padding: 5rem 0;
+            text-align: center;
+            background: radial-gradient(ellipse at center, rgba(42, 171, 238, 0.1), transparent 60%);
+        }
+        .signup-card {
+            max-width: 520px;
+            margin: 0 auto;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 2.5rem 2rem;
+        }
+        .signup h2 {
+            font-size: 1.6rem;
+            color: var(--text-bright);
+            margin-bottom: 0.5rem;
+            font-weight: 700;
+        }
+        .signup p { color: var(--text-dim); margin-bottom: 2rem; font-size: 0.95rem; }
+        .signup-tg { display: flex; justify-content: center; margin-bottom: 1rem; }
+        .signup-note { font-size: 0.8rem; color: var(--text-dim); margin-top: 1.5rem; }
+
+        /* Code snippet */
+        .snippet {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.25rem 1.5rem;
+            margin: 3rem auto;
+            max-width: 720px;
+            font-family: var(--font-mono);
+            font-size: 0.9rem;
+            color: #79c0ff;
+            overflow-x: auto;
+        }
+        .snippet::before {
+            content: "Terminal";
+            display: block;
+            color: var(--text-dim);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            font-weight: 700;
+            margin-bottom: 0.6rem;
+            letter-spacing: 0.05em;
+        }
+
+        /* Footer */
+        footer {
+            border-top: 1px solid var(--border);
+            padding: 2.5rem 0;
+            text-align: center;
+            color: var(--text-dim);
+            font-size: 0.85rem;
+        }
+        footer a { color: var(--text); margin: 0 0.6rem; }
+
+        .live-dot {
+            display: inline-block;
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: var(--green);
+            margin-right: 0.4rem;
+            box-shadow: 0 0 6px rgba(46, 160, 67, 0.8);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    </style>
+</head>
+<body>
+    <nav class="nav">
+        <a href="/" class="nav-brand">
+            <div class="nav-brand-icon">⚡</div>
+            <span>NodePulse</span>
+        </a>
+        <div class="nav-links">
+            <a href="#features">Возможности</a>
+            <a href="#pricing">Тарифы</a>
+            <a href="https://github.com/NQAI-Dev/nodepulse" target="_blank">GitHub</a>
+            <a href="https://pulse.nqai.es-cloud.ru" class="btn">Войти</a>
+        </div>
+    </nav>
+
+    <section class="hero">
+        <div class="container">
+            <div class="hero-badge"><span class="live-dot"></span> Production · Open Source</div>
+            <h1>Мониторинг серверов,<br>который видит <span class="gradient">реальные проблемы</span></h1>
+            <p>Agent-based платформа: ловит падения контейнеров, деградацию дисков, просроченные TLS-сертификаты — за секунды, а не через 5 минут uptime-проверки.</p>
+            <div class="hero-cta">
+                <a href="#signup" class="btn btn-telegram btn-lg">⚡ Подключить через Telegram</a>
+                <a href="https://github.com/NQAI-Dev/nodepulse" target="_blank" class="btn btn-lg">📦 GitHub</a>
+            </div>
+            <div class="hero-trust">
+                <span>Бесплатный тариф навсегда</span>
+                <span>Альтернатива UptimeRobot</span>
+                <span>Telegram · Discord · Slack · Webhook</span>
+            </div>
+        </div>
+    </section>
+
+    <div class="container">
+        <div class="snippet">curl -sSL https://pulse.nqai.es-cloud.ru/install.sh | sh</div>
+    </div>
+
+    <section class="features" id="features">
+        <div class="container">
+            <h2 class="section-title">Не просто HTTP-проверка, а полная картина</h2>
+            <p class="section-sub">UptimeRobot скажет, что сайт не отвечает. NodePulse скажет — почему: упал Docker-контейнер, закончилось место, или PostgreSQL недоступен из-за просроченного сертификата.</p>
+            <div class="feature-grid">
+                <div class="feature">
+                    <div class="feature-icon">🐳</div>
+                    <h3>Docker-телеметрия</h3>
+                    <p>Мониторинг всех контейнеров на хосте: CPU, RAM, рестарты, healthcheck. Алерт при падении.</p>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">🔒</div>
+                    <h3>TLS-сертификаты</h3>
+                    <p>За 30 дней до истечения — предупреждение. За 7 дней — критический алерт в Telegram.</p>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">🌐</div>
+                    <h3>HTTP / TCP / DNS / ICMP</h3>
+                    <p>Probes всех уровней: от пинга до banner-grabbing PostgreSQL и Redis. Один агент — все проверки.</p>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">⚙️</div>
+                    <h3>systemd units</h3>
+                    <p>Следит за состоянием сервисов: nginx, postgres, redis. Автостарт при crash.</p>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">📊</div>
+                    <h3>Public status page</h3>
+                    <p>Красивая публичная страница для клиентов: pulse.nqai.es-cloud.ru — ваша за 30 секунд.</p>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">🤖</div>
+                    <h3>Alerts в Telegram</h3>
+                    <p>Inline-кнопки: «Acknowledge» и «Resolve» прямо в уведомлении. Без перехода в браузер.</p>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">🛡️</div>
+                    <h3>Auto-heal</h3>
+                    <p>Агент сам перезапускает упавшие контейнеры по стратегии (db / cache / stateless). Dry-run режим.</p>
+                </div>
+                <div class="feature">
+                    <div class="feature-icon">🔌</div>
+                    <h3>Webhook-интеграции</h3>
+                    <p>Slack, Discord, генераторы тикетов, свои сервисы. Подписанные payload'ы, retry с backoff.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="pricing" id="pricing">
+        <div class="container">
+            <h2 class="section-title">Тарифы</h2>
+            <p class="section-sub">Бесплатно для личных проектов и малых команд. PRO — для тех, кто хочет быстрее и больше.</p>
+            <div class="pricing-grid">
+                <div class="plan">
+                    <div class="plan-name">Free</div>
+                    <div class="plan-price">0 ₽</div>
+                    <div class="plan-desc">Навсегда, без карты</div>
+                    <ul class="plan-features">
+                        <li>3 ноды</li>
+                        <li>5 мониторов</li>
+                        <li>Интервал 1 минута</li>
+                        <li>Алерты в Telegram</li>
+                        <li>Public status page</li>
+                        <li class="no">Webhook / Slack / Discord</li>
+                        <li class="no">Custom domain</li>
+                    </ul>
+                    <div class="plan-cta">
+                        <a href="#signup" class="btn">Начать бесплатно</a>
+                    </div>
+                </div>
+                <div class="plan featured">
+                    <div class="plan-badge">Популярный</div>
+                    <div class="plan-name">Pro</div>
+                    <div class="plan-price">499 ₽<span class="per">/мес</span></div>
+                    <div class="plan-desc">Или $5.5 · оплата картой или Telegram Stars</div>
+                    <ul class="plan-features">
+                        <li>50 нод</li>
+                        <li>50 мониторов</li>
+                        <li>Интервал 30 секунд</li>
+                        <li>Все каналы: Telegram / Slack / Discord / Webhook</li>
+                        <li>Auto-heal + стратегии</li>
+                        <li>7-дневная история инцидентов</li>
+                        <li>API для интеграций</li>
+                    </ul>
+                    <div class="plan-cta">
+                        <a href="#signup" class="btn btn-primary">Попробовать 14 дней</a>
+                    </div>
+                </div>
+                <div class="plan">
+                    <div class="plan-name">Team</div>
+                    <div class="plan-price">1499 ₽<span class="per">/мес</span></div>
+                    <div class="plan-desc">Для студий и команд</div>
+                    <ul class="plan-features">
+                        <li>Безлимит нод</li>
+                        <li>Безлимит мониторов</li>
+                        <li>Интервал 10 секунд</li>
+                        <li>Всё из Pro</li>
+                        <li>Custom domain</li>
+                        <li>30-дневная история</li>
+                        <li>Командные роли</li>
+                    </ul>
+                    <div class="plan-cta">
+                        <a href="#signup" class="btn">Связаться</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="signup" id="signup">
+        <div class="container">
+            <div class="signup-card">
+                <h2>Подключиться за 30 секунд</h2>
+                <p>Авторизуйся через Telegram — получишь API-ключ и команду установки агента. Никаких паролей.</p>
+                <div class="signup-tg" id="tg-widget"></div>
+                <div class="signup-note">Telegram бот <strong>@nodepulse_mon_bot</strong> сохранит твой chat ID для алертов.</div>
+            </div>
+        </div>
+    </section>
+
+    <footer>
+        <div class="container">
+            <p>
+                <a href="https://github.com/NQAI-Dev/nodepulse" target="_blank">GitHub</a> ·
+                <a href="https://t.me/nodepulse_mon_bot" target="_blank">Telegram</a> ·
+                <a href="https://pulse.nqai.es-cloud.ru">Login</a>
+            </p>
+            <p style="margin-top: 0.5rem;">NodePulse · Made by NQAI · 2026</p>
+        </div>
+    </footer>
+
+    <script>
+        // Render Telegram Login Widget into placeholder (button stays clickable).
+        (function() {
+            const placeholder = document.getElementById('tg-widget');
+            const script = document.createElement('script');
+            script.async = true;
+            script.src = 'https://telegram.org/js/telegram-widget.js?22';
+            script.setAttribute('data-telegram-login', 'nodepulse_mon_bot');
+            script.setAttribute('data-size', 'large');
+            script.setAttribute('data-auth-url', '/api/v1/tg-callback');
+            script.setAttribute('data-request-access', 'write');
+            placeholder.appendChild(script);
+        })();
+    </script>
+</body>
+</html>
