@@ -15,7 +15,6 @@ import (
 
 	"github.com/NQAI-Dev/nodepulse/pkg/alerter"
 	"github.com/NQAI-Dev/nodepulse/pkg/billing"
-	"github.com/NQAI-Dev/nodepulse/pkg/metrics"
 	"github.com/NQAI-Dev/nodepulse/pkg/protocol"
 	"github.com/NQAI-Dev/nodepulse/pkg/store"
 )
@@ -48,7 +47,6 @@ func main() {
 	}
 	cryptoClient := billing.NewCryptoBot(cToken)
 
-	serverStart := time.Now()
 	pStore, err := store.NewPersistentStore(*dbPath, token, chatID)
 	if err != nil {
 		log.Fatalf("Store initialization failure: %v", err)
@@ -1135,13 +1133,6 @@ echo "==> [NodePulse] Agent installed and registered successfully as ${NODE_ID}!
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok","system":"nodepulse-platform"}` + "\n"))
-	})
-
-	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		if err := metrics.WriteFleet(w, pStore, serverStart); err != nil {
-			log.Printf("metrics render error: %v", err)
-		}
 	})
 
 	mux.Handle("/", http.FileServer(http.Dir("web/public")))
