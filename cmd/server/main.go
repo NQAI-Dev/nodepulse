@@ -181,40 +181,12 @@ func main() {
 	})
 
 	// 2. Billing endpoints
+	// Handler bodies live in billing_handlers.go so they can be
+	// unit-tested without spinning up the full mux. createInvoice is
+	// injected as a function value so tests can swap a stub for the
+	// real CryptoBot client (which requires network + valid API token).
 	mux.HandleFunc("POST /api/v1/billing/create-invoice", func(w http.ResponseWriter, r *http.Request) {
-		uid, uname, err := getUser(r)
-		if err != nil {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
-
-		inv, err := cryptoClient.CreateInvoice("5.00", "USDT", "NodePulse Pro Plan (1 Month)", fmt.Sprintf("%d", uid))
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-
-		invID := fmt.Sprintf("%d", inv.Result.InvoiceID)
-		if err := pStore.SaveInvoice(invID, uid, "pro", inv.Result.Amount, inv.Result.PayURL); err != nil {
-			// SaveInvoice now returns error (8af1a60). If the DB write fails after
-			// CryptoBot already issued an invoice, the user would pay, webhook would
-			// fire, MarkInvoicePaid would fail on lookup, and the user would silently
-			// never upgrade. 500 here surfaces the failure immediately so the user
-			// can retry instead of paying against a phantom invoice.
-			log.Printf("[billing] save invoice %s for user %s (id %d) failed: %v", invID, uname, uid, err)
-			http.Error(w, `{"error":"failed to persist invoice — please retry"}`, http.StatusInternalServerError)
-			return
-		}
-
-		log.Printf("Created invoice %s for user %s (id %d)", invID, uname, uid)
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(protocol.InvoiceResponse{
-			InvoiceID: invID,
-			PayURL:    inv.Result.PayURL,
-			Amount:    inv.Result.Amount,
-			Currency:  inv.Result.Asset,
-		})
+		handleBillingCreateInvoice(w, r, pStore, cryptoClient.CreateInvoice)
 	})
 
 	mux.HandleFunc("POST /api/v1/billing/webhook", func(w http.ResponseWriter, r *http.Request) {
