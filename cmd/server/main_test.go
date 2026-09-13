@@ -1,13 +1,20 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NQAI-Dev/nodepulse/pkg/protocol"
 	"github.com/NQAI-Dev/nodepulse/pkg/store"
@@ -253,5 +260,100 @@ func TestAutohealLog_RecordAutoHealLogsFailure(t *testing.T) {
 	// were persisted when no INSERT ever happened.
 	if strings.Contains(respBody, `"accepted":true`) {
 		t.Fatalf("handler silently accepted autoheal logs after backend failure: %q", respBody)
+	}
+}
+
+// signedTelegramHash returns the HMAC-SHA256 hash a real Telegram Login
+// Widget would produce for the given query string, using botToken as the
+// shared secret. Mirrors the algorithm in handleTgCallback so the test
+// can construct a query that passes the handler's HMAC validation and
+// reaches the RegisterByTelegram call — which is where the prod failure
+// mode lives.
+func signedTelegramHash(query url.Values, botToken string) string {
+	keys := make([]string, 0, len(query))
+	for k := range query {
+		if k == "hash" {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+query.Get(k))
+	}
+	checkString := strings.Join(parts, "\n")
+	secretKey := sha256.Sum256([]byte(botToken))
+	mac := hmac.New(sha256.New, secretKey[:])
+	mac.Write([]byte(checkString))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// TestTgCallback_RegisterByTelegramFailure pins the 7173c0d fix at the
+// HTTP boundary. The handler was rewritten to surface errors from
+// pStore.RegisterByTelegram as 500 instead of silently returning a 302
+// with a fragment containing a token that was never persisted. Drops
+// api_tokens to force the auth-path INSERT inside RegisterByTelegram to
+// fail, signs a valid Telegram-style query, GETs the endpoint, and
+// asserts the 500 response — NOT a 302 redirect.
+//
+// Regression guard for 2026-09-13 ~19:30 UTC prod incident class — every
+// Telegram login (the SaaS onboarding flow) goes through this endpoint,
+// and a silent-INSERT regression would surface to the user as "logged
+// in, dashboard greets me, but every subsequent API call returns 401"
+// which is the EXACT pre-aacd56e failure mode.
+func TestTgCallback_RegisterByTelegramFailure(t *testing.T) {
+	dbPath := "/tmp/test_tg_callback_failure.db"
+	os.Remove(dbPath)
+	defer os.Remove(dbPath)
+
+	pStore, err := store.NewPersistentStore(dbPath, "", 0)
+	if err != nil {
+		t.Fatalf("NewPersistentStore: %v", err)
+	}
+
+	const testBotToken = "123456:ABC-DEF-test-bot-token"
+
+	// Construct a valid Telegram-style query: id, first_name, username,
+	// auth_date (within 5-minute freshness window), and the computed hash.
+	authDate := strconv.FormatInt(time.Now().Unix(), 10)
+	q := url.Values{}
+	q.Set("id", "888111222")
+	q.Set("first_name", "TelegramUser")
+	q.Set("username", "tguser")
+	q.Set("auth_date", authDate)
+	q.Set("hash", signedTelegramHash(q, testBotToken))
+
+	// Force RegisterByTelegram to fail by dropping api_tokens. This
+	// mirrors the EXACT prod failure mode the silent-p.db.Exec class
+	// used to mask — the auth-path INSERT for the freshly-issued
+	// tg-login token fails with "no such table: api_tokens". After
+	// 7173c0d this error must surface; pre-fix it was discarded and the
+	// handler would have 302'd with a fragment pointing at a token
+	// that was never persisted.
+	if _, err := pStore.DB().Exec("DROP TABLE api_tokens"); err != nil {
+		t.Fatalf("drop api_tokens: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/tg-callback?"+q.Encode(), nil)
+	w := httptest.NewRecorder()
+
+	handleTgCallback(w, req, pStore, testBotToken)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d, want 500; body=%q", w.Code, w.Body.String())
+	}
+	respBody := w.Body.String()
+	if !strings.Contains(respBody, "internal error") {
+		t.Fatalf("response must contain 'internal error' guidance, got %q", respBody)
+	}
+	// Defence in depth: the handler must NEVER have issued a 302 with
+	// a fragment containing a token. Pre-fix (7173c0d) the
+	// discarded-error swallow would have replied 302 with
+	// /index.html#token=...&user_id=...&tg_id=..., leaving the
+	// dashboard with a token that's not in api_tokens and every
+	// subsequent API call returning 401.
+	if w.Code == http.StatusFound && strings.Contains(w.Header().Get("Location"), "#token=") {
+		t.Fatalf("handler silently issued redirect with fragment after backend failure: %q", w.Header().Get("Location"))
 	}
 }

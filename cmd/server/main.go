@@ -158,71 +158,7 @@ func main() {
 	// the new API token in the URL fragment (dashboard JS reads it into
 	// localStorage so the operator never has to copy/paste it).
 	mux.HandleFunc("GET /api/v1/tg-callback", func(w http.ResponseWriter, r *http.Request) {
-		if token == "" {
-			http.Error(w, `{"error":"tg-callback not configured: set NODEPULSE_TG_TOKEN or -tg-token"}`, http.StatusServiceUnavailable)
-			return
-		}
-		q := r.URL.Query()
-		hash := q.Get("hash")
-		if hash == "" {
-			http.Error(w, `{"error":"missing hash"}`, http.StatusBadRequest)
-			return
-		}
-
-		// Build the canonical check string: all fields except `hash`, sorted
-		// alphabetically, joined with \n as `key=value` pairs.
-		q.Del("hash")
-		keys := make([]string, 0, len(q))
-		for k := range q {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		var parts []string
-		for _, k := range keys {
-			parts = append(parts, k+"="+q.Get(k))
-		}
-		checkString := strings.Join(parts, "\n")
-
-		// Telegram spec: secret_key = sha256(bot_token), then HMAC-SHA256 the
-		// check string with that secret. Compare with the supplied hash in
-		// constant time so timing leaks can't help an attacker guess fields.
-		secretKey := sha256.Sum256([]byte(token))
-		mac := hmac.New(sha256.New, secretKey[:])
-		mac.Write([]byte(checkString))
-		computed := hex.EncodeToString(mac.Sum(nil))
-		if subtle.ConstantTimeCompare([]byte(computed), []byte(hash)) != 1 {
-			http.Error(w, `{"error":"invalid hash"}`, http.StatusUnauthorized)
-			return
-		}
-
-		// auth_date freshness check: 5 minutes. Telegram documents do not
-		// mandate this, but accepting week-old signatures would let a
-		// screenshot of the widget authorize forever.
-		authDateStr := q.Get("auth_date")
-		if authDate, err := strconv.ParseInt(authDateStr, 10, 64); err == nil {
-			if time.Now().Unix()-authDate > 300 {
-				http.Error(w, `{"error":"auth_date too old"}`, http.StatusUnauthorized)
-				return
-			}
-		}
-
-		tgID, err := strconv.ParseInt(q.Get("id"), 10, 64)
-		if err != nil || tgID == 0 {
-			http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
-			return
-		}
-		uid, tok, err := pStore.RegisterByTelegram(tgID, q.Get("first_name"), q.Get("username"))
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		log.Printf("[tg-callback] login ok tg_id=%d uid=%d", tgID, uid)
-
-		// Redirect to dashboard with token in URL fragment so the dashboard
-		// JS picks it up via `window.location.hash` and stashes it in
-		// localStorage without ever sending it to a third-party server log.
-		fragment := fmt.Sprintf("token=%s&user_id=%d&tg_id=%d", tok, uid, tgID)
-		http.Redirect(w, r, "/index.html#"+fragment, http.StatusFound)
+		handleTgCallback(w, r, pStore, token)
 	})
 
 	// 1b. Invite endpoints. These back the nodepulse-bot `/start <token>`
@@ -1756,4 +1692,87 @@ func handleAutohealLog(w http.ResponseWriter, r *http.Request, pStore *store.Per
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"accepted": true})
+}
+
+// handleTgCallback validates a Telegram Login Widget callback and signs the
+// user in via pStore.RegisterByTelegram. Handler body lives in file scope so
+// the schema-drift failure path can be unit-tested without spinning up the
+// full mux. Mirrors the installScript / handleHeartbeatIngest /
+// handleAutohealLog extraction pattern.
+//
+// The closure previously captured only `token` (bot token) and `pStore`, both
+// of which are passed as explicit parameters here — no main()-local
+// dependencies.
+func handleTgCallback(w http.ResponseWriter, r *http.Request, pStore *store.PersistentStore, botToken string) {
+	if botToken == "" {
+		http.Error(w, `{"error":"tg-callback not configured: set NODEPULSE_TG_TOKEN or -tg-token"}`, http.StatusServiceUnavailable)
+		return
+	}
+	q := r.URL.Query()
+	hash := q.Get("hash")
+	if hash == "" {
+		http.Error(w, `{"error":"missing hash"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Build the canonical check string: all fields except `hash`, sorted
+	// alphabetically, joined with \n as `key=value` pairs.
+	q.Del("hash")
+	keys := make([]string, 0, len(q))
+	for k := range q {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var parts []string
+	for _, k := range keys {
+		parts = append(parts, k+"="+q.Get(k))
+	}
+	checkString := strings.Join(parts, "\n")
+
+	// Telegram spec: secret_key = sha256(bot_token), then HMAC-SHA256 the
+	// check string with that secret. Compare with the supplied hash in
+	// constant time so timing leaks can't help an attacker guess fields.
+	secretKey := sha256.Sum256([]byte(botToken))
+	mac := hmac.New(sha256.New, secretKey[:])
+	mac.Write([]byte(checkString))
+	computed := hex.EncodeToString(mac.Sum(nil))
+	if subtle.ConstantTimeCompare([]byte(computed), []byte(hash)) != 1 {
+		http.Error(w, `{"error":"invalid hash"}`, http.StatusUnauthorized)
+		return
+	}
+
+	// auth_date freshness check: 5 minutes. Telegram documents do not
+	// mandate this, but accepting week-old signatures would let a
+	// screenshot of the widget authorize forever.
+	authDateStr := q.Get("auth_date")
+	if authDate, err := strconv.ParseInt(authDateStr, 10, 64); err == nil {
+		if time.Now().Unix()-authDate > 300 {
+			http.Error(w, `{"error":"auth_date too old"}`, http.StatusUnauthorized)
+			return
+		}
+	}
+
+	tgID, err := strconv.ParseInt(q.Get("id"), 10, 64)
+	if err != nil || tgID == 0 {
+		http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
+		return
+	}
+	uid, tok, err := pStore.RegisterByTelegram(tgID, q.Get("first_name"), q.Get("username"))
+	if err != nil {
+		// RegisterByTelegram was made error-returning in 7173c0d. Failure
+		// here MUST surface as 500, not a silent 302 with a fragment
+		// containing a token that was never persisted to api_tokens.
+		// That exact bug was the 2026-09-13 ~19:30 UTC prod incident
+		// class — silent schema drift masked by discarded errors.
+		log.Printf("[tg-callback] register failed tg_id=%d first_name=%q err=%v", tgID, q.Get("first_name"), err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	log.Printf("[tg-callback] login ok tg_id=%d uid=%d", tgID, uid)
+
+	// Redirect to dashboard with token in URL fragment so the dashboard
+	// JS picks it up via `window.location.hash` and stashes it in
+	// localStorage without ever sending it to a third-party server log.
+	fragment := fmt.Sprintf("token=%s&user_id=%d&tg_id=%d", tok, uid, tgID)
+	http.Redirect(w, r, "/index.html#"+fragment, http.StatusFound)
 }
