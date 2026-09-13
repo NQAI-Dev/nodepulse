@@ -347,6 +347,33 @@ func main() {
 		json.NewEncoder(w).Encode(pStore.GetPublicFleetSummary())
 	})
 
+	// Public Atom feed for incident tracking and syndication
+	renderFeed := func(w http.ResponseWriter, r *http.Request) {
+		limit := 100
+		sinceUnix := time.Now().Unix() - int64(30*24*3600) // last 30 days
+		items, err := pStore.GetPublicIncidentHistory(sinceUnix, limit)
+		if err != nil {
+			http.Error(w, "feed generation failed", http.StatusInternalServerError)
+			return
+		}
+		scheme := "https"
+		if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" && r.Host != "pulse.nqai.es-cloud.ru" {
+			scheme = "http"
+		}
+		baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
+		feedBytes, err := store.RenderAtomFeed(baseURL, "NodePulse System Status", items)
+		if err != nil {
+			http.Error(w, "feed encoding failed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/atom+xml; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		w.Write(feedBytes)
+	}
+	mux.HandleFunc("GET /api/v1/public/feed.atom", renderFeed)
+	mux.HandleFunc("GET /status/feed.atom", renderFeed)
+	mux.HandleFunc("GET /feed.atom", renderFeed)
+
 	mux.HandleFunc("GET /api/v1/public/badge", func(w http.ResponseWriter, r *http.Request) {
 		label := r.URL.Query().Get("label")
 		if label == "" {
