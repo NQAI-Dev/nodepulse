@@ -225,6 +225,25 @@ func main() {
 		http.Redirect(w, r, "/index.html#"+fragment, http.StatusFound)
 	})
 
+	// 1b. Invite endpoints. These back the nodepulse-bot `/start <token>`
+	// deep-link onboarding flow: an operator mints an invite via
+	// POST /api/v1/invites (master-token auth) and shares the resulting
+	// `https://t.me/nodepulse_mon_bot?start=<token>` URL with a user.
+	// When the user clicks, the bot calls POST /api/v1/invites/redeem
+	// with the token + chat_id; the server marks the invite redeemed
+	// and returns the bound user_id so the bot knows which tenant the
+	// chat belongs to. Handler bodies live in invites_handlers.go so
+	// they can be unit-tested without spinning up the full mux.
+	mux.HandleFunc("POST /api/v1/invites", func(w http.ResponseWriter, r *http.Request) {
+		handleInviteCreate(pStore, w, r)
+	})
+	mux.HandleFunc("GET /api/v1/invites", func(w http.ResponseWriter, r *http.Request) {
+		handleInviteList(pStore, w, r)
+	})
+	mux.HandleFunc("POST /api/v1/invites/redeem", func(w http.ResponseWriter, r *http.Request) {
+		handleInviteRedeem(pStore, w, r)
+	})
+
 	// 2. Billing endpoints
 	mux.HandleFunc("POST /api/v1/billing/create-invoice", func(w http.ResponseWriter, r *http.Request) {
 		uid, uname, err := getUser(r)

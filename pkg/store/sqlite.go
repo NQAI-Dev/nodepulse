@@ -507,6 +507,29 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		updated_at INTEGER NOT NULL
 	)`)
 
+	// Invites: one-time-use tokens minted by an operator (master-token
+	// auth on POST /api/v1/invites) and redeemed by a Telegram chat that
+	// arrives via a bot `/start <token>` deep-link. Binds the chat to a
+	// user_id (or to a freshly-created user when `auto_create_user` is
+	// set) so subsequent bot commands carry the operator's identity
+	// without re-prompting for credentials. redeemed_at is set on first
+	// redemption; subsequent calls return ErrInviteAlreadyRedeemed
+	// without touching any other row.
+	db.Exec(`CREATE TABLE IF NOT EXISTS invites (
+		token TEXT PRIMARY KEY,
+		created_by INTEGER NOT NULL,
+		target_user_id INTEGER NOT NULL DEFAULT 0,
+		auto_create_user INTEGER NOT NULL DEFAULT 0,
+		default_username TEXT DEFAULT '',
+		created_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL DEFAULT 0,
+		redeemed_at INTEGER NOT NULL DEFAULT 0,
+		redeemed_by_chat_id INTEGER NOT NULL DEFAULT 0,
+		FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE CASCADE
+	)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_invites_target ON invites(target_user_id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_invites_redeemed ON invites(redeemed_at)")
+
 	// Create admin user if not exists
 	var adminID int64
 	err = db.QueryRow("SELECT id FROM users WHERE username = 'admin'").Scan(&adminID)
@@ -828,6 +851,213 @@ func (p *PersistentStore) BindNode(nodeID string, userID int64) error {
 	return nil
 }
 
+// Invite is a one-time-use token minted by an operator and redeemed by a
+// Telegram chat that arrives via a bot `/start <token>` deep-link. The
+// redemption path is atomic: a single UPDATE inside a transaction that
+// checks redeemed_at=0 in the WHERE clause, returning ErrInviteAlready
+// Redeemed if the token was already consumed or ErrInviteNotFound if the
+// token doesn't exist. target_user_id=0 with auto_create_user=1 means the
+// redeemer becomes a brand new user (created via RegisterByTelegram-style
+// bootstrap with a stable tg_<chat_id> username); otherwise the chat is
+// linked to the pre-existing target_user_id via telegram_users.
+//
+// expires_at=0 means no expiry. Operators typically set it to 7 days for
+// "share this with your client" flows; a permanent token is fine for
+// always-on onboarding URLs (e.g. printed in a README).
+type Invite struct {
+	Token              string
+	CreatedBy          int64
+	TargetUserID       int64
+	AutoCreateUser     bool
+	DefaultUsername    string
+	CreatedAt          int64
+	ExpiresAt          int64
+	RedeemedAt         int64
+	RedeemedByChatID   int64
+}
+
+// Invite errors. Distinct sentinels so HTTP handlers can map them to
+// 404 / 410 / 409 without parsing strings.
+var (
+	ErrInviteNotFound          = errors.New("invite not found")
+	ErrInviteAlreadyRedeemed   = errors.New("invite already redeemed")
+	ErrInviteExpired           = errors.New("invite expired")
+)
+
+// CreateInvite mints a new invite row. Caller-supplied token must be a
+// non-empty unique string (typical: 32-byte random hex prefixed with
+// "np_inv_"). expires_at=0 means never expires. Returns the inserted
+// invite (with CreatedAt populated) on success.
+func (p *PersistentStore) CreateInvite(inv Invite) (*Invite, error) {
+	if inv.Token == "" {
+		return nil, fmt.Errorf("CreateInvite: empty token")
+	}
+	if inv.CreatedBy == 0 {
+		return nil, fmt.Errorf("CreateInvite: created_by must be non-zero")
+	}
+	if inv.CreatedAt == 0 {
+		inv.CreatedAt = time.Now().Unix()
+	}
+	autoCreate := 0
+	if inv.AutoCreateUser {
+		autoCreate = 1
+	}
+	if _, err := p.db.Exec(`
+		INSERT INTO invites (token, created_by, target_user_id, auto_create_user,
+		                     default_username, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		inv.Token, inv.CreatedBy, inv.TargetUserID, autoCreate,
+		inv.DefaultUsername, inv.CreatedAt, inv.ExpiresAt,
+	); err != nil {
+		return nil, fmt.Errorf("insert invite: %w", err)
+	}
+	return &inv, nil
+}
+
+// GetInvite fetches an invite by token. Returns ErrInviteNotFound when no
+// row matches. Does NOT check expiry or redeemed status — callers decide
+// how to surface those (Redeem uses them atomically; admin list views
+// might want to render "expired" / "redeemed" labels).
+func (p *PersistentStore) GetInvite(token string) (*Invite, error) {
+	var inv Invite
+	var autoCreate int
+	err := p.db.QueryRow(`
+		SELECT token, created_by, target_user_id, auto_create_user,
+		       default_username, created_at, expires_at,
+		       redeemed_at, redeemed_by_chat_id
+		FROM invites WHERE token = ?`, token,
+	).Scan(&inv.Token, &inv.CreatedBy, &inv.TargetUserID, &autoCreate,
+		&inv.DefaultUsername, &inv.CreatedAt, &inv.ExpiresAt,
+		&inv.RedeemedAt, &inv.RedeemedByChatID)
+	if err == sql.ErrNoRows {
+		return nil, ErrInviteNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query invite: %w", err)
+	}
+	inv.AutoCreateUser = autoCreate != 0
+	return &inv, nil
+}
+
+// ListInvites returns the most-recently-created invites up to `limit`.
+// limit <= 0 defaults to 100. Order: created_at DESC so the operator UI
+// shows freshest first.
+func (p *PersistentStore) ListInvites(limit int) ([]*Invite, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := p.db.Query(`
+		SELECT token, created_by, target_user_id, auto_create_user,
+		       default_username, created_at, expires_at,
+		       redeemed_at, redeemed_by_chat_id
+		FROM invites ORDER BY created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list invites: %w", err)
+	}
+	defer rows.Close()
+	var out []*Invite
+	for rows.Next() {
+		var inv Invite
+		var autoCreate int
+		if err := rows.Scan(&inv.Token, &inv.CreatedBy, &inv.TargetUserID, &autoCreate,
+			&inv.DefaultUsername, &inv.CreatedAt, &inv.ExpiresAt,
+			&inv.RedeemedAt, &inv.RedeemedByChatID); err != nil {
+			return nil, fmt.Errorf("scan invite: %w", err)
+		}
+		inv.AutoCreateUser = autoCreate != 0
+		out = append(out, &inv)
+	}
+	return out, rows.Err()
+}
+
+// RedeemInvite atomically validates and marks an invite as redeemed.
+//
+// On success the returned Invite has RedeemedAt and RedeemedByChatID
+// populated. The full state machine:
+//   - token missing              → ErrInviteNotFound
+//   - expires_at > 0 and < now   → ErrInviteExpired
+//   - redeemed_at != 0           → ErrInviteAlreadyRedeemed (with the
+//                                  existing redeemed_at / chat_id so the
+//                                  caller can decide whether to leak that
+//                                  to the redeemer — we DO leak it inside
+//                                  the returned Invite for diagnostics).
+//
+// Atomicity: a single UPDATE ... WHERE token=? AND redeemed_at=0 ... is
+// issued; rows-affected=0 distinguishes "not found / already redeemed"
+// via a follow-up SELECT that reads the actual row. This avoids a
+// read-then-write race where two concurrent redeem attempts would
+// both see redeemed_at=0 and both succeed.
+func (p *PersistentStore) RedeemInvite(token string, chatID int64) (*Invite, error) {
+	if token == "" {
+		return nil, fmt.Errorf("RedeemInvite: empty token")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now().Unix()
+	res, err := p.db.Exec(`
+		UPDATE invites
+		SET redeemed_at = ?, redeemed_by_chat_id = ?
+		WHERE token = ? AND redeemed_at = 0`,
+		now, chatID, token,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("redeem invite: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("redeem invite rows-affected: %w", err)
+	}
+
+	if affected == 1 {
+		// Happy path: we won the race. Read back the row so the caller
+		// has the full invite (target_user_id, expires_at, etc.) plus
+		// the freshly-stamped redeemed_at.
+		var inv Invite
+		var autoCreate int
+		err := p.db.QueryRow(`
+			SELECT token, created_by, target_user_id, auto_create_user,
+			       default_username, created_at, expires_at,
+			       redeemed_at, redeemed_by_chat_id
+			FROM invites WHERE token = ?`, token,
+		).Scan(&inv.Token, &inv.CreatedBy, &inv.TargetUserID, &autoCreate,
+			&inv.DefaultUsername, &inv.CreatedAt, &inv.ExpiresAt,
+			&inv.RedeemedAt, &inv.RedeemedByChatID)
+		if err != nil {
+			return nil, fmt.Errorf("read redeemed invite: %w", err)
+		}
+		inv.AutoCreateUser = autoCreate != 0
+		// Surface expiry post-hoc so the caller can warn the user even
+		// though the redeem technically succeeded.
+		if inv.ExpiresAt > 0 && now > inv.ExpiresAt {
+			return &inv, ErrInviteExpired
+		}
+		return &inv, nil
+	}
+
+	// affected == 0: either token doesn't exist, or it was already
+	// redeemed. Read the row to distinguish (and to surface expiry if
+	// the only reason we lost the race is that the row expired between
+	// issuance and now — which the WHERE didn't catch because we only
+	// checked redeemed_at=0).
+	inv, err := p.GetInvite(token)
+	if err != nil {
+		return nil, err
+	}
+	if inv.ExpiresAt > 0 && now > inv.ExpiresAt {
+		return inv, ErrInviteExpired
+	}
+	if inv.RedeemedAt != 0 {
+		return inv, ErrInviteAlreadyRedeemed
+	}
+	// Shouldn't happen — UPDATE matched 0 rows but the row exists and
+	// isn't redeemed nor expired. Could be a concurrent writer
+	// completing a write transaction that was in-flight. Surface as
+	// already-redeemed to the caller; the next attempt will see the
+	// post-commit state.
+	return inv, ErrInviteAlreadyRedeemed
+}
+
 func (p *PersistentStore) GetUserNodes(userID int64) map[string]*NodeState {
 	all := p.mem.GetAll()
 	// Admin sees all
@@ -871,6 +1101,19 @@ func (p *PersistentStore) ValidateToken(token string) bool {
 // queries the DB) fails. Constant-time comparison.
 func (p *PersistentStore) IsMasterToken(token string) bool {
 	return subtle.ConstantTimeCompare([]byte(token), []byte(p.masterToken)) == 1
+}
+
+// MasterToken returns the cached master admin token. Operators may need
+// this for break-glass admin operations (the token is also persisted
+// once at startup to /etc/nodepulse/nodepulse-server.env via the
+// cmd/server binary, but reading it back from the process is the only
+// path available to in-process callers like the invite endpoints).
+//
+// Caller contract: do NOT log this in normal flow. Master-token
+// rotation events log the value once on rotation; everything else
+// should use ValidateToken / IsMasterToken for comparisons.
+func (p *PersistentStore) MasterToken() string {
+	return p.masterToken
 }
 
 func (p *PersistentStore) Ingest(hb *protocol.Heartbeat) {
