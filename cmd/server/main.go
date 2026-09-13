@@ -891,6 +891,37 @@ func main() {
 		_ = json.NewEncoder(w).Encode(notes)
 	})
 
+	// Merged incident timeline — every ack/resolve/note event for one
+	// incident, chronologically ordered. Cheaper than the UI firing three
+	// parallel requests and keeps the audit hand-off story in one place.
+	mux.HandleFunc("GET /api/v1/incidents/{id}/timeline", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		id := r.PathValue("id")
+		if id == "" {
+			http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
+			return
+		}
+		owns, _ := pStore.UserOwnsIncident(uid, id)
+		if uid > 1 && !owns {
+			http.Error(w, `{"error":"incident not found"}`, http.StatusNotFound)
+			return
+		}
+		events, err := pStore.IncidentTimeline(id)
+		if err != nil {
+			http.Error(w, `{"error":"timeline failure"}`, http.StatusInternalServerError)
+			return
+		}
+		if events == nil {
+			events = []store.TimelineEvent{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(events)
+	})
+
 	mux.HandleFunc("POST /api/v1/maintenance", func(w http.ResponseWriter, r *http.Request) {
 		uid, uname, err := getUser(r)
 		if err != nil {
