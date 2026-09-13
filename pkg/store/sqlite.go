@@ -431,7 +431,14 @@ func (p *PersistentStore) RegisterByTelegram(tgID int64, firstName, username str
 	var uid int64
 	err := p.db.QueryRow("SELECT user_id FROM telegram_users WHERE tg_id = ?", tgID).Scan(&uid)
 	if err == nil {
-		// Existing TG user: just issue a new token.
+		// Existing TG user: refresh profile fields (Telegram users can rename
+		// themselves, and the dashboard greeting pulls from these columns).
+		// Issue a fresh token so a previous device's session can't outlive the
+		// new login window.
+		if firstName != "" || username != "" {
+			p.db.Exec("UPDATE telegram_users SET tg_first_name = ?, tg_username = ? WHERE tg_id = ?",
+				firstName, username, tgID)
+		}
 		token := fmt.Sprintf("np_tg_%x", sha256.Sum256([]byte(fmt.Sprintf("%d-%d", tgID, time.Now().UnixNano()))))[:36]
 		p.db.Exec("INSERT INTO api_tokens (token, user_id, name) VALUES (?, ?, 'tg-login')", token, uid)
 		return uid, token, nil
