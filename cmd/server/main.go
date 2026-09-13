@@ -984,6 +984,37 @@ func main() {
 		w.Write([]byte(`{"success":true}` + "\n"))
 	})
 
+	// Close a maintenance window early (without losing the audit row).
+	// Distinct from DELETE: this stamps end_unix=now so the silence lifts
+	// but the row stays in the closed history. Idempotent.
+	mux.HandleFunc("POST /api/v1/maintenance/{id}/close", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		idStr := r.PathValue("id")
+		id, perr := strconv.ParseInt(idStr, 10, 64)
+		if perr != nil {
+			http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
+			return
+		}
+		n, err := pStore.CloseMaintenanceWindow(uid, id)
+		if err != nil {
+			http.Error(w, `{"error":"close failure"}`, http.StatusInternalServerError)
+			return
+		}
+		if n == 0 {
+			// Not id-forbidden vs not-found vs already-closed: same response,
+			// because the user-facing semantics are identical (the window is
+			// not active right now). Saves us from leaking ownership info.
+			http.Error(w, `{"error":"not found or already closed"}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":true}` + "\n"))
+	})
+
 	mux.HandleFunc("GET /api/v1/incidents/history", func(w http.ResponseWriter, r *http.Request) {
 		uid, _, err := getUser(r)
 		if err != nil {

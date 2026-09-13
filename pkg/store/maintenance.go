@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"strconv"
 	"strings"
@@ -105,6 +106,42 @@ func (p *PersistentStore) ListMaintenanceWindows(userID int64, closedOnly bool) 
 		out = append(out, w)
 	}
 	return out, rows.Err()
+}
+
+// CloseMaintenanceWindow stamps end_unix=now on an open-ended window
+// (end_unix=0) so the silence lifts without losing the audit row. The
+// owning user can only close their own windows; admin (uid<=1) can close
+// any. Re-closing an already-closed window is a no-op (returns 0).
+//
+// Idempotent + safe to call concurrently with IsNodeSilenced — the
+// isNodeSilenced check filters on (end_unix=0 OR end_unix>now), so once
+// end_unix is set to now() the row drops out of the active set within the
+// same statement. We do not delete the row because the UI history view
+// still wants to render "window ended 5m early".
+func (p *PersistentStore) CloseMaintenanceWindow(userID, id int64) (int64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now().Unix()
+	var res sql.Result
+	var err error
+	if userID <= 1 {
+		res, err = p.db.Exec(
+			`UPDATE maintenance_windows SET end_unix = ?
+			 WHERE id = ? AND end_unix = 0`,
+			now, id,
+		)
+	} else {
+		res, err = p.db.Exec(
+			`UPDATE maintenance_windows SET end_unix = ?
+			 WHERE id = ? AND user_id = ? AND end_unix = 0`,
+			now, id, userID,
+		)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // DeleteMaintenanceWindow removes a window by id. The owning user can only
