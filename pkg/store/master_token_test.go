@@ -295,3 +295,167 @@ func seedLegacyMasterToken(dbFile string) error {
 	}
 	return nil
 }
+
+// seedLegacyOwnerSchema creates the DB with the schema that real prod
+// carries as of Sep 13 2026: api_tokens has (token TEXT PRIMARY KEY,
+// owner TEXT NOT NULL, created_at DATETIME) and only carries a single
+// row whose token is the legacy literal and whose owner is 'admin'.
+// This mirrors the actual on-disk shape — no user_id, no name column,
+// no FOREIGN KEY. Used to simulate the historical layout that
+// migrateAPITokensSchema was written to upgrade.
+func seedLegacyOwnerSchema(dbFile string) error {
+	db, err := sql.Open("sqlite", dbFile)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		return err
+	}
+	// Same DDL the prod DB was created with — owner TEXT NOT NULL,
+	// token TEXT PRIMARY KEY, no user_id/name columns, no FK.
+	if _, err := db.Exec(`
+		CREATE TABLE users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT UNIQUE NOT NULL,
+			password_hash TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			plan TEXT DEFAULT 'free',
+			pro_until DATETIME
+		);
+		CREATE TABLE user_settings (
+			user_id INTEGER PRIMARY KEY,
+			slack_webhook_url TEXT DEFAULT '',
+			discord_webhook_url TEXT DEFAULT '',
+			notify_critical INTEGER DEFAULT 1,
+			notify_warning INTEGER DEFAULT 1
+		);
+		CREATE TABLE api_tokens (
+			token TEXT PRIMARY KEY,
+			owner TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+	`); err != nil {
+		return err
+	}
+	// Seed an admin user (id=1, matching prod). Seed the legacy literal
+	// in api_tokens with owner='admin', exactly as the prod DB stores it.
+	res, err := db.Exec("INSERT INTO users (username, password_hash) VALUES ('admin', 'placeholder')")
+	if err != nil {
+		return err
+	}
+	adminID, _ := res.LastInsertId()
+	if _, err := db.Exec("INSERT INTO user_settings (user_id) VALUES (?)", adminID); err != nil {
+		return err
+	}
+	if _, err := db.Exec(
+		"INSERT INTO api_tokens (token, owner) VALUES (?, ?)",
+		legacyMasterTokenLiteral, "admin",
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+// TestEnsureMasterTokenMigratesLegacyOwnerSchema pins the real prod
+// migration path: a database shaped exactly like the one we hit in
+// production (api_tokens has owner TEXT, no user_id/name columns, only
+// one row carrying the legacy literal) must come out of
+// NewPersistentStore with the legacy literal rotated to a random
+// value, the api_tokens schema upgraded to user_id/name, and the
+// literal no longer authenticating.
+func TestEnsureMasterTokenMigratesLegacyOwnerSchema(t *testing.T) {
+	dbFile := "test_master_migrate_owner.db"
+	defer os.Remove(dbFile)
+
+	if err := seedLegacyOwnerSchema(dbFile); err != nil {
+		t.Fatalf("seed legacy owner schema: %v", err)
+	}
+
+	// Pre-condition: the seeded table really does have the old schema.
+	// If this assertion fails the test fixture is wrong, not the code.
+	preCols, err := apiTokensColumns(mustOpenDBForTest(t, dbFile))
+	if err != nil {
+		t.Fatalf("pre-migration columns: %v", err)
+	}
+	if _, ok := preCols["owner"]; !ok {
+		t.Fatalf("pre-migration schema missing 'owner' column; fixture is wrong: %v", preCols)
+	}
+	if _, ok := preCols["user_id"]; ok {
+		t.Fatalf("pre-migration schema must NOT have 'user_id'; fixture is wrong: %v", preCols)
+	}
+	if _, ok := preCols["name"]; ok {
+		t.Fatalf("pre-migration schema must NOT have 'name'; fixture is wrong: %v", preCols)
+	}
+
+	// Run the migration + rotation.
+	s, err := NewPersistentStore(dbFile, "", 0)
+	if err != nil {
+		t.Fatalf("NewPersistentStore on legacy-owner DB: %v", err)
+	}
+
+	// Post-condition 1: api_tokens now has user_id AND name columns.
+	postCols, err := apiTokensColumns(mustOpenDBForTest(t, dbFile))
+	if err != nil {
+		t.Fatalf("post-migration columns: %v", err)
+	}
+	if _, ok := postCols["user_id"]; !ok {
+		t.Fatalf("post-migration schema missing 'user_id': %v", postCols)
+	}
+	if _, ok := postCols["name"]; !ok {
+		t.Fatalf("post-migration schema missing 'name': %v", postCols)
+	}
+
+	// Post-condition 2: the legacy literal has been rotated to a fresh
+	// random token. Read via the public helper so we exercise the same
+	// query path that production code uses.
+	row := readMasterTokenRow(t, dbFile)
+	if row == nil {
+		t.Fatalf("no master token row after migration+rotation")
+	}
+	if row.token == legacyMasterTokenLiteral {
+		t.Fatalf("legacy literal still in DB after migration; rotation failed: %q", row.token)
+	}
+	if !strings.HasPrefix(row.token, "np_master_") {
+		t.Fatalf("rotated token must be prefixed 'np_master_', got %q", row.token)
+	}
+
+	// Post-condition 3: the legacy literal no longer authenticates.
+	if s.ValidateToken(legacyMasterTokenLiteral) {
+		t.Fatalf("ValidateToken(legacy literal) must return false after migration+rotation")
+	}
+	if s.ValidateToken(row.token) != true {
+		t.Fatalf("ValidateToken(stored master) must return true after migration+rotation")
+	}
+	if s.IsMasterToken(legacyMasterTokenLiteral) {
+		t.Fatalf("IsMasterToken(legacy literal) must return false after migration+rotation")
+	}
+	if !s.IsMasterToken(row.token) {
+		t.Fatalf("IsMasterToken(stored master) must return true after migration+rotation")
+	}
+
+	// Post-condition 4: a subsequent NewPersistentStore on the same DB
+	// preserves the rotated token (no churn from the migration running
+	// again on every startup).
+	_, err = NewPersistentStore(dbFile, "", 0)
+	if err != nil {
+		t.Fatalf("second NewPersistentStore: %v", err)
+	}
+	row2 := readMasterTokenRow(t, dbFile)
+	if row2.token != row.token {
+		t.Fatalf("second startup re-rotated the token; expected %q, got %q", row.token, row2.token)
+	}
+}
+
+// mustOpenDBForTest opens a fresh sqlite connection for schema
+// inspection. Returns only on success — any open error fails the test
+// immediately. Caller is responsible for closing the returned DB.
+func mustOpenDBForTest(t *testing.T, dbFile string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbFile)
+	if err != nil {
+		t.Fatalf("open raw DB %s: %v", dbFile, err)
+	}
+	return db
+}

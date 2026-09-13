@@ -99,6 +99,110 @@ func HashPassword(pwd string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// apiTokensColumns returns the set of column names that exist on the
+// api_tokens table as it stands right now. Used by migrateAPITokensSchema
+// to detect schema drift between older prod databases and the schema
+// declared by CREATE TABLE IF NOT EXISTS api_tokens above.
+func apiTokensColumns(db *sql.DB) (map[string]struct{}, error) {
+	rows, err := db.Query("PRAGMA table_info(api_tokens)")
+	if err != nil {
+		return nil, fmt.Errorf("inspect api_tokens: %w", err)
+	}
+	defer rows.Close()
+	cols := map[string]struct{}{}
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return nil, fmt.Errorf("scan api_tokens column: %w", err)
+		}
+		cols[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate api_tokens columns: %w", err)
+	}
+	return cols, nil
+}
+
+// migrateAPITokensSchema handles the historical schema drift where
+// api_tokens had (token, owner, created_at) but the current source
+// code declares (token, user_id, name, created_at). Older prod
+// databases have the 'owner' column and are missing user_id/name; new
+// installs go straight to the new schema.
+//
+// Steps (each idempotent — re-running on an already-migrated DB is a
+// no-op):
+//
+//  1. ADD COLUMN user_id INTEGER (no default; existing rows stay NULL
+//     until step 3 fills them in).
+//  2. ADD COLUMN name TEXT DEFAULT 'default' (so any existing rows that
+//     were valid under the OLD schema get a non-NULL name after
+//     migration; ensureMasterToken's rotation branch then matches
+//     against the legacy literal in the token column, not on name).
+//  3. For rows that have an 'owner' column AND user_id is still NULL,
+//     look up the matching users.id by username and copy it in. This
+//     maps legacy 'owner' strings (e.g. 'admin') to the new
+//     user_id INTEGER.
+//  4. If the legacy literal token 'np_live_master_secret' is still in
+//     the table and its name column is empty/default, mark it
+//     name='master' so ensureMasterToken's rotation branch finds it on
+//     first startup-after-deploy and rotates it to a fresh random
+//     value.
+//
+// The migration runs every startup but is essentially free on an
+// already-current DB (PRAGMA + map lookup + 2 ALTERs only if columns
+// are missing). Each step surfaces its own error so a failure points
+// at the exact step that broke, not at the whole migration as a
+// monolith.
+func migrateAPITokensSchema(db *sql.DB) error {
+	cols, err := apiTokensColumns(db)
+	if err != nil {
+		return err
+	}
+	_, hasUserID := cols["user_id"]
+	_, hasName := cols["name"]
+	_, hasOwner := cols["owner"]
+	if hasUserID && hasName {
+		return nil
+	}
+	log.Printf("[nodepulse] migrating api_tokens schema: user_id=%v name=%v owner=%v",
+		hasUserID, hasName, hasOwner)
+
+	if !hasUserID {
+		if _, err := db.Exec("ALTER TABLE api_tokens ADD COLUMN user_id INTEGER"); err != nil {
+			return fmt.Errorf("migrate api_tokens: add user_id: %w", err)
+		}
+	}
+	if !hasName {
+		if _, err := db.Exec("ALTER TABLE api_tokens ADD COLUMN name TEXT DEFAULT 'default'"); err != nil {
+			return fmt.Errorf("migrate api_tokens: add name: %w", err)
+		}
+	}
+	if hasOwner {
+		// Re-read cols in case the ALTERs above changed anything (they
+		// don't, but be defensive).
+		if _, err := db.Exec(`
+			UPDATE api_tokens
+			SET user_id = (SELECT id FROM users WHERE username = api_tokens.owner LIMIT 1)
+			WHERE user_id IS NULL OR user_id = 0
+		`); err != nil {
+			return fmt.Errorf("migrate api_tokens: remap owner to user_id: %w", err)
+		}
+	}
+	// Mark the legacy-literal row as name='master' so ensureMasterToken
+	// can find it and rotate it. Idempotent: if name is already 'master',
+	// the UPDATE is a no-op.
+	if _, err := db.Exec(`
+		UPDATE api_tokens
+		SET name = 'master'
+		WHERE token = ? AND (name IS NULL OR name = '' OR name = 'default')
+	`, legacyMasterTokenLiteral); err != nil {
+		return fmt.Errorf("migrate api_tokens: tag legacy literal as master: %w", err)
+	}
+	return nil
+}
+
 // ensureMasterToken guarantees a single api_tokens row with name='master'
 // exists for adminID. Three branches:
 //
@@ -394,6 +498,19 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 			// exists but the master token row still holds the well-
 			// known literal that needs rotating).
 		}
+	}
+
+	// One-time schema migration for api_tokens. Older prod databases
+	// were created with the (token, owner, created_at) layout; current
+	// source declares (token, user_id, name, created_at). Without this
+	// migration ensureMasterToken's SELECT against user_id/name would
+	// fail with SQL logic error on a database that predates the schema
+	// refactor (which silently failed at INSERT time — see the prod
+	// users table having 7 rows but api_tokens only carrying the master
+	// literal). Each step is idempotent; see migrateAPITokensSchema for
+	// the full rationale.
+	if err := migrateAPITokensSchema(db); err != nil {
+		return nil, fmt.Errorf("migrate api_tokens: %w", err)
 	}
 
 	// Ensure a master admin token row exists in api_tokens. The cached
