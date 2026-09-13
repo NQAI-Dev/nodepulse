@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -828,6 +829,104 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(pStore.GetActiveIncidents(uid))
+	})
+
+	// Metric alert rules CRUD. Each rule pins a CPU/MEM/DISK/load1
+	// threshold to a node or to a tag-selected fleet. The evaluator runs
+	// on every heartbeat from cmd/server/ingest; these handlers only own
+	// the lifecycle and listing endpoints.
+	mux.HandleFunc("GET /api/v1/alert-rules", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		nodeID := r.URL.Query().Get("node_id")
+		rules, listErr := pStore.ListMetricAlertRules(uid, nodeID)
+		if listErr != nil {
+			http.Error(w, `{"error":"failed to list rules"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"rules": rules})
+	})
+
+	mux.HandleFunc("POST /api/v1/alert-rules", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		var req protocol.MetricAlertRuleRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+			return
+		}
+		id, err := pStore.CreateMetricAlertRule(uid, req)
+		if errors.Is(err, store.ErrAlertRuleInvalid) {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			http.Error(w, `{"error":"failed to create rule"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{"id": id})
+	})
+
+	mux.HandleFunc("PUT /api/v1/alert-rules/{id}", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		idStr := r.PathValue("id")
+		idInt, parseErr := strconv.ParseInt(idStr, 10, 64)
+		if parseErr != nil || idInt <= 0 {
+			http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
+			return
+		}
+		var req protocol.MetricAlertRuleRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+			return
+		}
+		if err := pStore.UpdateMetricAlertRule(uid, idInt, req); err != nil {
+			if errors.Is(err, store.ErrAlertRuleInvalid) {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+				return
+			}
+			if errors.Is(err, sql.ErrNoRows) {
+				http.Error(w, `{"error":"rule not found"}`, http.StatusNotFound)
+				return
+			}
+			http.Error(w, `{"error":"failed to update rule"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":true}` + "\n"))
+	})
+
+	mux.HandleFunc("DELETE /api/v1/alert-rules/{id}", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		idStr := r.PathValue("id")
+		idInt, parseErr := strconv.ParseInt(idStr, 10, 64)
+		if parseErr != nil || idInt <= 0 {
+			http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
+			return
+		}
+		if err := pStore.DeleteMetricAlertRule(uid, idInt); err != nil {
+			http.Error(w, `{"error":"failed to delete rule"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":true}` + "\n"))
 	})
 
 	mux.HandleFunc("POST /api/v1/incidents/resolve", func(w http.ResponseWriter, r *http.Request) {

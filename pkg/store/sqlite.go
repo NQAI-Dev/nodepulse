@@ -26,6 +26,11 @@ type PersistentStore struct {
 	defaultChatID int64 // remembered at construction so we can target the configured chat without asking the Notifier
 	uptime        *uptimeTracker
 	netRates      *networkRateTracker
+	// alertEval / alertInitOnce own the per-rule breach state for
+	// EvaluateMetricAlert. Lazily allocated so legacy constructor paths
+	// (notably the test helpers) keep working without parameter churn.
+	alertEval     *AlertEvaluator
+	alertInitOnce sync.Once
 }
 
 // Recorder exposes the webhook audit-trail wrapper so the janitor can drain
@@ -274,6 +279,34 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	);
 	CREATE INDEX IF NOT EXISTS idx_probes_url_ts ON probe_results(url, ts);
 	CREATE INDEX IF NOT EXISTS idx_probes_node_ts ON probe_results(node_id, ts);
+
+	-- metric_alert_rules: per-user threshold rules for cpu/mem/disk/load1.
+	-- scope = 'node' pins to a single node_id, scope = 'fleet' matches nodes
+	-- whose tags hit tag_selector (AND of comma-separated k=v pairs, or 'any:'
+	-- prefix for OR). enabled = 1 is a soft-disable; rules with enabled = 0
+	-- are skipped at evaluate time but stay editable. last_fired_at /
+	-- last_cleared_at are bookkeeping timestamps surfaced on the operator API.
+	CREATE TABLE IF NOT EXISTS metric_alert_rules (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		node_id TEXT NOT NULL DEFAULT '',
+		tag_selector TEXT NOT NULL DEFAULT '',
+		scope TEXT NOT NULL DEFAULT 'node',
+		metric TEXT NOT NULL,
+		op TEXT NOT NULL DEFAULT 'gt',
+		threshold REAL NOT NULL DEFAULT 0,
+		for_seconds INTEGER NOT NULL DEFAULT 0,
+		severity TEXT NOT NULL DEFAULT 'warning',
+		title TEXT NOT NULL DEFAULT '',
+		enabled INTEGER NOT NULL DEFAULT 1,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		last_fired_at INTEGER NOT NULL DEFAULT 0,
+		last_cleared_at INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE INDEX IF NOT EXISTS idx_alert_rules_scope ON metric_alert_rules(scope, enabled);
+	CREATE INDEX IF NOT EXISTS idx_alert_rules_user ON metric_alert_rules(user_id);
+	CREATE INDEX IF NOT EXISTS idx_alert_rules_node ON metric_alert_rules(node_id);
 	`
 	if _, err := db.Exec(uptimeSchema); err != nil {
 		return nil, err
@@ -460,6 +493,36 @@ func (p *PersistentStore) Ingest(hb *protocol.Heartbeat) {
 		DiskUsedPct: diskPct,
 	}); err != nil {
 		log.Printf("metrics sample: %v", err)
+	}
+
+	// Evaluate user-defined threshold rules against this heartbeat. The
+	// evaluator owns its own state (per-rule breach start, firing
+	// incident id) and routes fired alerts back through the existing
+	// CreateIncident path, so telegram + webhook routing and cooldown
+	// are reused without duplication. Pass the owner user id so
+	// per-user rules fire on their fleet; scope=fleet also re-resolves
+	// the tag selector against node_tags.
+	if ownerID, _ := p.GetNodeOwner(hb.NodeID); ownerID > 0 {
+		p.EvaluateMetricAlert(hb.NodeID, fmt.Sprintf("%d", ownerID), MetricSample{
+			NodeID:      hb.NodeID,
+			Timestamp:   hb.Timestamp,
+			CPUPercent:  cpuPct,
+			Load1:       hb.CPU.Load1,
+			MemUsedPct:  hb.Memory.UsedPercent,
+			DiskUsedPct: diskPct,
+		})
+	} else {
+		// Admin / unbound nodes still get evaluated against scope=fleet
+		// admin rules (user_id=0). Pass an empty owner so the evaluator's
+		// query doesn't pretend the row belongs to a non-admin user.
+		p.EvaluateMetricAlert(hb.NodeID, "", MetricSample{
+			NodeID:      hb.NodeID,
+			Timestamp:   hb.Timestamp,
+			CPUPercent:  cpuPct,
+			Load1:       hb.CPU.Load1,
+			MemUsedPct:  hb.Memory.UsedPercent,
+			DiskUsedPct: diskPct,
+		})
 	}
 
 	if len(hb.Network) > 0 {
