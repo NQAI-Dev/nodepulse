@@ -395,7 +395,13 @@ func TestEnsureMasterTokenMigratesLegacyOwnerSchema(t *testing.T) {
 		t.Fatalf("NewPersistentStore on legacy-owner DB: %v", err)
 	}
 
-	// Post-condition 1: api_tokens now has user_id AND name columns.
+	// Post-condition 1: api_tokens now has user_id AND name columns,
+	// AND the legacy 'owner' column has been dropped. owner is dead
+	// weight after the user_id remap; leaving it in place keeps its
+	// NOT NULL constraint active, which silently blocks every
+	// token-issuance INSERT in the codebase (Register, RegisterByTelegram,
+	// Authenticate all omit owner). We hit this exact failure in prod
+	// on 2026-09-13 ~19:30 UTC.
 	postCols, err := apiTokensColumns(mustOpenDBForTest(t, dbFile))
 	if err != nil {
 		t.Fatalf("post-migration columns: %v", err)
@@ -405,6 +411,9 @@ func TestEnsureMasterTokenMigratesLegacyOwnerSchema(t *testing.T) {
 	}
 	if _, ok := postCols["name"]; !ok {
 		t.Fatalf("post-migration schema missing 'name': %v", postCols)
+	}
+	if _, ok := postCols["owner"]; ok {
+		t.Fatalf("post-migration schema still has 'owner' column; INSERTs that omit owner will silently fail on NOT NULL: %v", postCols)
 	}
 
 	// Post-condition 2: the legacy literal has been rotated to a fresh
@@ -458,4 +467,97 @@ func mustOpenDBForTest(t *testing.T, dbFile string) *sql.DB {
 		t.Fatalf("open raw DB %s: %v", dbFile, err)
 	}
 	return db
+}
+
+// TestRegisterByTelegramPersistsTokenOnLegacyOwnerSchema pins the
+// regression that hit prod on 2026-09-13 ~19:30 UTC: the api_tokens
+// schema migration in commit 4a728d3 added the user_id and name columns
+// but left the original 'owner' column with its NOT NULL constraint
+// in place. RegisterByTelegram (and Register, and Authenticate) all
+// issue `INSERT INTO api_tokens (token, user_id, name) ...` without
+// supplying owner; the INSERT fails on the constraint; the error from
+// p.db.Exec is silently discarded; the function returns the freshly
+// generated token to the handler; the handler builds a 302 redirect
+// pointing at the unstored token. The redirect works (browser sees the
+// fragment); the next API call with that token fails ValidateToken
+// (token isn't in api_tokens); the user sees "I logged in but
+// everything's broken". The earlier 19:30 tick claimed the schema
+// migration had fixed this; this test demonstrates that claim was
+// wrong until the DROP COLUMN step lands.
+//
+// The test creates a DB with the EXACT prod pre-migration shape (see
+// seedLegacyOwnerSchema above), runs NewPersistentStore (which runs
+// the full migration including the new DROP COLUMN step), then calls
+// RegisterByTelegram and verifies:
+//
+//  1. The function succeeds (no error).
+//  2. The returned token is actually present in api_tokens —
+//     pre-fix this would return rowCount == 0 because the INSERT
+//     silently failed on owner NOT NULL.
+//  3. ValidateToken accepts the token — pre-fix the token existed
+//     nowhere in the DB so this would return false.
+//  4. The api_tokens row carries name='tg-login' so audit/revoke can
+//     find it.
+func TestRegisterByTelegramPersistsTokenOnLegacyOwnerSchema(t *testing.T) {
+	dbFile := "test_telegram_persist_legacy.db"
+	defer os.Remove(dbFile)
+
+	if err := seedLegacyOwnerSchema(dbFile); err != nil {
+		t.Fatalf("seed legacy owner schema: %v", err)
+	}
+
+	// NewPersistentStore must succeed (it runs the migration including
+	// the new DROP COLUMN step).
+	s, err := NewPersistentStore(dbFile, "", 0)
+	if err != nil {
+		t.Fatalf("NewPersistentStore on legacy-owner DB: %v", err)
+	}
+
+	const tgID int64 = 777888999
+	uid, tok, err := s.RegisterByTelegram(tgID, "Charlie", "charlie_handle")
+	if err != nil {
+		t.Fatalf("RegisterByTelegram: %v", err)
+	}
+	if uid <= 0 {
+		t.Fatalf("expected positive uid, got %d", uid)
+	}
+
+	// Pre-fix the token was returned to the caller but never persisted;
+	// this query would return 0 rows and the assertion would fire.
+	var rowCount int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM api_tokens WHERE token = ?", tok).Scan(&rowCount); err != nil {
+		t.Fatalf("count api_tokens by token: %v", err)
+	}
+	if rowCount != 1 {
+		t.Fatalf("expected 1 api_tokens row for the issued token %q, got %d (INSERT silently failed on owner NOT NULL?)", tok, rowCount)
+	}
+
+	// The token must validate — otherwise the 302 redirect would be a
+	// lie and the next API call would 401.
+	if !s.ValidateToken(tok) {
+		t.Fatalf("issued token %q did not validate (not in DB?)", tok)
+	}
+
+	// And it must carry name='tg-login' so revoke/audit can find it.
+	var name string
+	if err := s.db.QueryRow("SELECT name FROM api_tokens WHERE token = ?", tok).Scan(&name); err != nil {
+		t.Fatalf("read name: %v", err)
+	}
+	if name != "tg-login" {
+		t.Fatalf("expected name='tg-login', got %q", name)
+	}
+
+	// A second call with the same tg_id reuses the user and issues a
+	// fresh token that must ALSO persist. Pre-fix this would have failed
+	// silently the same way as the first call.
+	_, tok2, err := s.RegisterByTelegram(tgID, "CharlieRenamed", "charlie_new")
+	if err != nil {
+		t.Fatalf("second RegisterByTelegram: %v", err)
+	}
+	if tok2 == tok {
+		t.Fatalf("expected fresh token on second login, got identical value")
+	}
+	if !s.ValidateToken(tok2) {
+		t.Fatalf("second token %q did not validate", tok2)
+	}
 }

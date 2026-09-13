@@ -132,7 +132,7 @@ func apiTokensColumns(db *sql.DB) (map[string]struct{}, error) {
 // installs go straight to the new schema.
 //
 // Steps (each idempotent — re-running on an already-migrated DB is a
-// no-op):
+// no-op except for the bookkeeping log line):
 //
 //  1. ADD COLUMN user_id INTEGER (no default; existing rows stay NULL
 //     until step 3 fills them in).
@@ -149,9 +149,22 @@ func apiTokensColumns(db *sql.DB) (map[string]struct{}, error) {
 //     name='master' so ensureMasterToken's rotation branch finds it on
 //     first startup-after-deploy and rotates it to a fresh random
 //     value.
+//  5. DROP COLUMN owner. After step 3, user_id is the canonical owner
+//     reference; owner is dead weight and its NOT NULL constraint
+//     blocks every token-issuance INSERT in the codebase
+//     (Register, RegisterByTelegram, Authenticate all do
+//     `INSERT INTO api_tokens (token, user_id, name)` — none supply
+//     owner). Without this step the INSERT fails silently on the
+//     constraint, the error from p.db.Exec is discarded, the function
+//     returns the unstored token to the handler, and the user gets a
+//     302 redirect pointing at a token that ValidateToken will reject
+//     on every subsequent request. We hit this in prod on 2026-09-13
+//     ~19:30 UTC after the schema-add migration landed but before
+//     this DROP COLUMN step existed. SQLite 3.35+ supports DROP COLUMN;
+//     the VDS SQLite is 3.46.1.
 //
 // The migration runs every startup but is essentially free on an
-// already-current DB (PRAGMA + map lookup + 2 ALTERs only if columns
+// already-current DB (PRAGMA + map lookup + 0-2 ALTERs only if columns
 // are missing). Each step surfaces its own error so a failure points
 // at the exact step that broke, not at the whole migration as a
 // monolith.
@@ -163,10 +176,11 @@ func migrateAPITokensSchema(db *sql.DB) error {
 	_, hasUserID := cols["user_id"]
 	_, hasName := cols["name"]
 	_, hasOwner := cols["owner"]
-	if hasUserID && hasName {
-		return nil
-	}
-	log.Printf("[nodepulse] migrating api_tokens schema: user_id=%v name=%v owner=%v",
+
+	// Always log the observed state. Even on already-current DBs this
+	// is useful post-mortem ("did the migration see what we expected?")
+	// and costs nothing.
+	log.Printf("[nodepulse] api_tokens schema state: user_id=%v name=%v owner=%v",
 		hasUserID, hasName, hasOwner)
 
 	if !hasUserID {
@@ -180,8 +194,9 @@ func migrateAPITokensSchema(db *sql.DB) error {
 		}
 	}
 	if hasOwner {
-		// Re-read cols in case the ALTERs above changed anything (they
-		// don't, but be defensive).
+		// Step 3: remap legacy 'owner' (TEXT) to user_id (INTEGER) so
+		// the master row keeps its admin linkage after owner is dropped
+		// in step 5.
 		if _, err := db.Exec(`
 			UPDATE api_tokens
 			SET user_id = (SELECT id FROM users WHERE username = api_tokens.owner LIMIT 1)
@@ -199,6 +214,15 @@ func migrateAPITokensSchema(db *sql.DB) error {
 		WHERE token = ? AND (name IS NULL OR name = '' OR name = 'default')
 	`, legacyMasterTokenLiteral); err != nil {
 		return fmt.Errorf("migrate api_tokens: tag legacy literal as master: %w", err)
+	}
+	// Step 5: drop the legacy 'owner' column. See the package-level
+	// comment above for why this is required even though step 3 already
+	// copied owner → user_id.
+	if hasOwner {
+		if _, err := db.Exec("ALTER TABLE api_tokens DROP COLUMN owner"); err != nil {
+			return fmt.Errorf("migrate api_tokens: drop owner column: %w", err)
+		}
+		log.Printf("[nodepulse] dropped legacy api_tokens.owner column")
 	}
 	return nil
 }
