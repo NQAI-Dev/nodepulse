@@ -135,6 +135,23 @@
         .severity-pill { font-size: 0.6rem; padding: 1px 6px; border-radius: 3px; font-weight: 700; text-transform: uppercase; font-family: var(--font-mono); margin-right: 0.4rem; }
         .severity-pill.critical { background: rgba(248, 81, 73, 0.15); color: var(--red); border: 1px solid rgba(248, 81, 73, 0.3); }
         .severity-pill.warning { background: rgba(210, 153, 34, 0.15); color: var(--orange); border: 1px solid rgba(210, 153, 34, 0.3); }
+        .timeline-event { display: grid; grid-template-columns: 60px 1fr; gap: 0.6rem; padding: 0.4rem 0; border-bottom: 1px dashed var(--border); font-size: 0.78rem; }
+        .timeline-event:last-child { border-bottom: none; }
+        .timeline-event-kind { font-family: var(--font-mono); font-size: 0.65rem; text-transform: uppercase; text-align: center; padding: 2px 0; border-radius: 3px; align-self: start; }
+        .timeline-event-kind.ack { background: rgba(88, 166, 255, 0.15); color: var(--accent); }
+        .timeline-event-kind.resolve { background: rgba(63, 185, 80, 0.15); color: var(--green); }
+        .timeline-event-kind.note { background: rgba(210, 153, 34, 0.15); color: var(--orange); }
+        .timeline-event-ts { color: var(--text-dim); font-family: var(--font-mono); font-size: 0.65rem; }
+        .timeline-event-author { color: var(--text-dim); font-size: 0.7rem; }
+        .timeline-event-body { color: var(--text-bright); word-break: break-word; }
+        .timeline-event-reason { color: var(--text-dim); font-family: var(--font-mono); font-size: 0.65rem; margin-left: 0.4rem; }
+        .incident-timeline-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.8rem; margin-top: 0.6rem; }
+        .incident-timeline-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; font-weight: 700; }
+        .incident-note-form { display: flex; gap: 0.4rem; margin-top: 0.6rem; }
+        .incident-note-input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 0.4rem 0.6rem; font-family: inherit; font-size: 0.78rem; }
+        .incident-note-input:focus { outline: none; border-color: var(--accent); }
+        .incident-note-submit { background: var(--accent); color: var(--bg); border: none; border-radius: 4px; padding: 0.4rem 0.8rem; font-weight: 600; font-size: 0.78rem; cursor: pointer; }
+        .incident-note-submit:disabled { opacity: 0.4; cursor: not-allowed; }
         .history-summary { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.5rem; margin-bottom: 0.8rem; }
         .summary-box { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem; }
         .summary-label { font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; font-weight: 600; }
@@ -925,6 +942,12 @@
                                 <div class="timeline-title"><span class="severity-pill ${i.severity}">${i.severity}</span>${escapeHtml(i.title)}</div>
                                 ${i.detail ? `<div class="timeline-detail">${escapeHtml(i.detail)}</div>` : ''}
                                 ${i.resolved ? `<div class="timeline-resolved">✓ resolved in ${duration}</div>` : (i.acknowledged_at ? `<div class="timeline-resolved" style="color:var(--accent);">✓ acknowledged ${formatDuration(Math.max(0, Math.floor((Date.now()/1000)) - i.acknowledged_at))} ago</div>` : '<div class="timeline-resolved" style="color:var(--orange);">⚠ active · not acknowledged</div>')}
+                                <div class="incident-timeline-panel" id="incident-tl-${i.id}">
+                                    <div class="incident-timeline-head">
+                                        <span>Audit timeline</span>
+                                        <button class="incident-note-submit" style="font-size:0.65rem; padding:0.2rem 0.5rem;" onclick="toggleIncidentTimeline('${i.id}')">expand</button>
+                                    </div>
+                                </div>
                             </div>
                             <div class="timeline-meta">${startedAt.toLocaleString()}</div>
                         </div>
@@ -959,6 +982,96 @@
         function escapeHtml(s) {
             if (s == null) return '';
             return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        // Per-incident audit timeline (ack/resolve/notes). Lazy-loaded when
+        // the operator expands the panel; fetched via the merged /timeline
+        // endpoint so the UI does not have to fan out three requests.
+        const _incidentTimelineCache = {};
+        async function loadIncidentTimeline(incidentID) {
+            const headers = {};
+            if (currentAuth) headers['Authorization'] = 'Bearer ' + currentAuth.token;
+            const res = await fetch('/api/v1/incidents/' + encodeURIComponent(incidentID) + '/timeline', { headers });
+            if (!res.ok) {
+                return { error: 'failed to load timeline (' + res.status + ')' };
+            }
+            return { events: await res.json() };
+        }
+        async function toggleIncidentTimeline(incidentID) {
+            const panel = document.getElementById('incident-tl-' + incidentID);
+            if (!panel) return;
+            if (panel.dataset.loaded === '1') {
+                panel.dataset.loaded = '0';
+                panel.innerHTML = `<div class="incident-timeline-head"><span>Audit timeline</span><button class="incident-note-submit" style="font-size:0.65rem; padding:0.2rem 0.5rem;" onclick="toggleIncidentTimeline('${incidentID}')">expand</button></div>`;
+                return;
+            }
+            const cached = _incidentTimelineCache[incidentID];
+            const data = cached || await loadIncidentTimeline(incidentID);
+            if (!cached) _incidentTimelineCache[incidentID] = data;
+            panel.dataset.loaded = '1';
+            panel.innerHTML = renderIncidentTimeline(incidentID, data);
+            const ta = document.getElementById('incident-note-input-' + incidentID);
+            if (ta) {
+                ta.addEventListener('keydown', e => {
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        submitIncidentNote(incidentID);
+                    }
+                });
+            }
+        }
+        function renderIncidentTimeline(incidentID, data) {
+            const head = `<div class="incident-timeline-head"><span>Audit timeline</span><button class="incident-note-submit" style="font-size:0.65rem; padding:0.2rem 0.5rem;" onclick="toggleIncidentTimeline('${incidentID}')">collapse</button></div>`;
+            if (data.error) {
+                return head + `<div style="color:var(--red); font-size:0.7rem;">${escapeHtml(data.error)}</div>`;
+            }
+            const events = data.events || [];
+            const body = events.length === 0
+                ? '<div style="color:var(--text-dim); font-size:0.7rem; padding:0.4rem 0;">Пока нет событий</div>'
+                : events.map(ev => {
+                    const ts = new Date(ev.ts * 1000).toLocaleString();
+                    let main = '';
+                    if (ev.kind === 'ack') {
+                        main = '<span class="timeline-event-ts">operator acknowledged</span>';
+                    } else if (ev.kind === 'resolve') {
+                        main = `<span class="timeline-event-ts">resolved</span>${ev.reason ? `<span class="timeline-event-reason">[${escapeHtml(ev.reason)}]</span>` : ''}`;
+                    } else {
+                        main = `<div class="timeline-event-author">${escapeHtml(ev.username || 'user')}</div><div class="timeline-event-body">${escapeHtml(ev.body || '')}</div>`;
+                    }
+                    return `<div class="timeline-event"><div class="timeline-event-kind ${ev.kind}">${ev.kind}</div><div><div class="timeline-event-ts">${ts}</div>${main}</div></div>`;
+                }).join('');
+            const form = currentAuth
+                ? `<div class="incident-note-form"><input id="incident-note-input-${incidentID}" class="incident-note-input" type="text" maxlength="1024" placeholder="Add a note (⌘/Ctrl+Enter)" /><button class="incident-note-submit" onclick="submitIncidentNote('${incidentID}')">Post</button></div>`
+                : '';
+            return head + body + form;
+        }
+        async function submitIncidentNote(incidentID) {
+            const input = document.getElementById('incident-note-input-' + incidentID);
+            if (!input) return;
+            const body = input.value.trim();
+            if (!body) return;
+            const headers = { 'Content-Type': 'application/json' };
+            if (currentAuth) headers['Authorization'] = 'Bearer ' + currentAuth.token;
+            const btn = input.nextElementSibling;
+            if (btn) btn.disabled = true;
+            try {
+                const res = await fetch('/api/v1/incidents/' + encodeURIComponent(incidentID) + '/notes', {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ body }),
+                });
+                if (!res.ok) {
+                    const err = await res.text();
+                    alert('Note failed: ' + err);
+                    return;
+                }
+                delete _incidentTimelineCache[incidentID];
+                input.value = '';
+                await toggleIncidentTimeline(incidentID);
+                await toggleIncidentTimeline(incidentID);
+            } finally {
+                if (btn) btn.disabled = false;
+            }
         }
 
         updateAuthUI();
