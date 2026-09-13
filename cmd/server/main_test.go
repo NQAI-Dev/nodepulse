@@ -357,3 +357,351 @@ func TestTgCallback_RegisterByTelegramFailure(t *testing.T) {
 		t.Fatalf("handler silently issued redirect with fragment after backend failure: %q", w.Header().Get("Location"))
 	}
 }
+
+// TestAutohealLogsRead_AuthFailure pins the auth boundary on the
+// read-side counterpart of POST /api/v1/autoheal/log. Without a valid
+// non-master token the handler must return 401 with a JSON error body,
+// NOT 200 with another user's autoheal events. Defence against anyone
+// reverting the auth check or accidentally making the read endpoint
+// unauthenticated.
+func TestAutohealLogsRead_AuthFailure(t *testing.T) {
+	dbPath := "/tmp/test_autoheal_logs_read_auth.db"
+	os.Remove(dbPath)
+	defer os.Remove(dbPath)
+
+	pStore, err := store.NewPersistentStore(dbPath, "", 0)
+	if err != nil {
+		t.Fatalf("NewPersistentStore: %v", err)
+	}
+
+	// No Authorization header, no ?token= query param: must 401.
+	req := httptest.NewRequest("GET", "/api/v1/autoheal/logs?node_id=any-node", nil)
+	w := httptest.NewRecorder()
+	handleAutohealLogsRead(w, req, pStore)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("missing-token: got %d, want 401; body=%q", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"error":"unauthorized"`) {
+		t.Fatalf("missing-token: body must mention unauthorized, got %q", w.Body.String())
+	}
+
+	// Invalid token in Authorization header: must 401.
+	req2 := httptest.NewRequest("GET", "/api/v1/autoheal/logs?node_id=any-node", nil)
+	req2.Header.Set("Authorization", "Bearer np_invalid_xyz_zzz")
+	w2 := httptest.NewRecorder()
+	handleAutohealLogsRead(w2, req2, pStore)
+
+	if w2.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid-bearer: got %d, want 401; body=%q", w2.Code, w2.Body.String())
+	}
+	if !strings.Contains(w2.Body.String(), `"error":"unauthorized"`) {
+		t.Fatalf("invalid-bearer: body must mention unauthorized, got %q", w2.Body.String())
+	}
+}
+
+// TestAutohealLogsRead_MissingNodeID pins the required-parameter check.
+// Without node_id the handler must return 400, NOT silently default to
+// "all nodes" or "user's first node" — both would be information
+// disclosure paths.
+func TestAutohealLogsRead_MissingNodeID(t *testing.T) {
+	dbPath := "/tmp/test_autoheal_logs_read_nonode.db"
+	os.Remove(dbPath)
+	defer os.Remove(dbPath)
+
+	pStore, err := store.NewPersistentStore(dbPath, "", 0)
+	if err != nil {
+		t.Fatalf("NewPersistentStore: %v", err)
+	}
+
+	uid, token, err := pStore.Register("alice", "secret456")
+	if err != nil {
+		t.Fatalf("Register alice: %v", err)
+	}
+	if uid == 0 || token == "" {
+		t.Fatalf("Register returned zero values (uid=%d token=%q)", uid, token)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/autoheal/logs", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	handleAutohealLogsRead(w, req, pStore)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("no-node-id: got %d, want 400; body=%q", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "node_id required") {
+		t.Fatalf("no-node-id: body must mention node_id required, got %q", w.Body.String())
+	}
+}
+
+// TestAutohealLogsRead_NodeNotInFleet pins the multi-tenant boundary
+// enforced via GetUserNodes. A valid token from user A asking for
+// user B's node must return 403, NOT 200 with B's autoheal events.
+// This is the read-side counterpart to the per-user BindNode filter on
+// the POST side; without it, any registered user could enumerate
+// every node's remediation history.
+func TestAutohealLogsRead_NodeNotInFleet(t *testing.T) {
+	dbPath := "/tmp/test_autoheal_logs_read_cross.db"
+	os.Remove(dbPath)
+	defer os.Remove(dbPath)
+
+	pStore, err := store.NewPersistentStore(dbPath, "", 0)
+	if err != nil {
+		t.Fatalf("NewPersistentStore: %v", err)
+	}
+
+	// Two distinct users. Alice owns her own node; Bob asks for Alice's
+	// node — must be rejected.
+	uidA, _, err := pStore.Register("alice", "secret456")
+	if err != nil {
+		t.Fatalf("Register alice: %v", err)
+	}
+	_, tokenB, err := pStore.Register("bob", "secret789")
+	if err != nil {
+		t.Fatalf("Register bob: %v", err)
+	}
+
+	// Bind Alice's node to her uid so it shows up in GetUserNodes(uidA).
+	seedFleetNode(t, pStore, uidA, "alice-node-01")
+
+	req := httptest.NewRequest("GET", "/api/v1/autoheal/logs?node_id=alice-node-01", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenB)
+	w := httptest.NewRecorder()
+	handleAutohealLogsRead(w, req, pStore)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("cross-tenant: got %d, want 403; body=%q", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "node not in your fleet") {
+		t.Fatalf("cross-tenant: body must mention 'node not in your fleet', got %q", w.Body.String())
+	}
+}
+
+// TestAutohealLogsRead_EmptyResult pins the empty-state response shape.
+// A valid token, valid node_id, but no events recorded → 200 with
+// `{"node_id":"X","events":[]}` (NOT null, NOT 404, NOT a different
+// schema like `{"logs":[]}`).
+func TestAutohealLogsRead_EmptyResult(t *testing.T) {
+	dbPath := "/tmp/test_autoheal_logs_read_empty.db"
+	os.Remove(dbPath)
+	defer os.Remove(dbPath)
+
+	pStore, err := store.NewPersistentStore(dbPath, "", 0)
+	if err != nil {
+		t.Fatalf("NewPersistentStore: %v", err)
+	}
+
+	uid, token, err := pStore.Register("carol", "secret456")
+	if err != nil {
+		t.Fatalf("Register carol: %v", err)
+	}
+	seedFleetNode(t, pStore, uid, "carol-node-01")
+
+	req := httptest.NewRequest("GET", "/api/v1/autoheal/logs?node_id=carol-node-01", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	handleAutohealLogsRead(w, req, pStore)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("empty: got %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	var got struct {
+		NodeID string                `json:"node_id"`
+		Events []protocol.AutoHealLog `json:"events"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal body: %v; raw=%q", err, w.Body.String())
+	}
+	if got.NodeID != "carol-node-01" {
+		t.Fatalf("node_id: got %q, want carol-node-01", got.NodeID)
+	}
+	if len(got.Events) != 0 {
+		t.Fatalf("events: expected empty slice, got %d entries: %+v", len(got.Events), got.Events)
+	}
+}
+
+// TestAutohealLogsRead_WithEvents pins the happy-path round trip:
+// RecordAutoHealLogs persists 3 events → GET returns 3 events with the
+// same fields and in the same order (RecentAutoHealLogs ordering must
+// be stable across releases).
+func TestAutohealLogsRead_WithEvents(t *testing.T) {
+	dbPath := "/tmp/test_autoheal_logs_read_with.db"
+	os.Remove(dbPath)
+	defer os.Remove(dbPath)
+
+	pStore, err := store.NewPersistentStore(dbPath, "", 0)
+	if err != nil {
+		t.Fatalf("NewPersistentStore: %v", err)
+	}
+
+	uid, token, err := pStore.Register("dave", "secret456")
+	if err != nil {
+		t.Fatalf("Register dave: %v", err)
+	}
+	seedFleetNode(t, pStore, uid, "dave-node-01")
+
+	// Seed 3 distinct events via the production RecordAutoHealLogs
+	// path — that's the only entry point that writes to autoheal_logs.
+	// Timestamps MUST be within the last 24 hours — RecordAutoHealLogs
+	// runs a cleanup DELETE for older rows at the end of every batch,
+	// and the test would silently lose events with ancient ts values.
+	now := time.Now().Unix()
+	seed := []protocol.AutoHealLog{
+		{Command: "systemctl restart nginx", Status: "ok", Reason: "high_cpu", Ts: now - 300},
+		{Command: "systemctl restart app", Status: "ok", Reason: "oom_kill", Ts: now - 200},
+		{Command: "systemctl restart db", Status: "failed", Reason: "disk_full", Ts: now - 100},
+	}
+	if err := pStore.RecordAutoHealLogs("dave-node-01", uid, seed); err != nil {
+		t.Fatalf("RecordAutoHealLogs: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/autoheal/logs?node_id=dave-node-01", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	handleAutohealLogsRead(w, req, pStore)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	var got struct {
+		NodeID string                `json:"node_id"`
+		Events []protocol.AutoHealLog `json:"events"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal body: %v; raw=%q", err, w.Body.String())
+	}
+	if got.NodeID != "dave-node-01" {
+		t.Fatalf("node_id: got %q, want dave-node-01", got.NodeID)
+	}
+	if len(got.Events) != 3 {
+		t.Fatalf("events: got %d, want 3; raw=%v", len(got.Events), got.Events)
+	}
+	// RecentAutoHealLogs returns newest-first (ORDER BY id DESC), so
+	// the events come back in reverse insertion order. Pin that
+	// ordering as part of the contract — a future commit that
+	// accidentally reverses it would break operator dashboards that
+	// assume the most recent remediation is at index 0.
+	for i, want := range []protocol.AutoHealLog{seed[2], seed[1], seed[0]} {
+		if got.Events[i].Command != want.Command ||
+			got.Events[i].Status != want.Status ||
+			got.Events[i].Reason != want.Reason ||
+			got.Events[i].Ts != want.Ts {
+			t.Fatalf("event[%d]: got %+v, want %+v", i, got.Events[i], want)
+		}
+	}
+}
+
+// TestAutohealLogsRead_LimitClamping pins the ?limit= parsing rules:
+// invalid (non-numeric), zero, negative, and out-of-range (>200) values
+// must all silently fall back to the default of 50. A regression that
+// passes garbage through to RecentAutoHealLogs could cause the SQLite
+// query to error or — worse — silently return the entire table.
+func TestAutohealLogsRead_LimitClamping(t *testing.T) {
+	dbPath := "/tmp/test_autoheal_logs_read_limit.db"
+	os.Remove(dbPath)
+	defer os.Remove(dbPath)
+
+	pStore, err := store.NewPersistentStore(dbPath, "", 0)
+	if err != nil {
+		t.Fatalf("NewPersistentStore: %v", err)
+	}
+
+	uid, token, err := pStore.Register("erin", "secret456")
+	if err != nil {
+		t.Fatalf("Register erin: %v", err)
+	}
+	seedFleetNode(t, pStore, uid, "erin-node-01")
+
+	// Pin the clamp by exercising all four bad-value shapes in one
+	// request stream — each must still return 200 with the default
+	// applied. The handler doesn't surface the chosen limit back to
+	// the caller, so the assertion is "no error, 200 OK" + the
+	// behaviour was exercised by the parse path.
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"invalid-non-numeric", "limit=abc"},
+		{"zero", "limit=0"},
+		{"negative", "limit=-5"},
+		{"above-max", "limit=500"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/api/v1/autoheal/logs?node_id=erin-node-01&"+tc.query, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			w := httptest.NewRecorder()
+			handleAutohealLogsRead(w, req, pStore)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("got %d, want 200; body=%q", w.Code, w.Body.String())
+			}
+			var got struct {
+				NodeID string                `json:"node_id"`
+				Events []protocol.AutoHealLog `json:"events"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatalf("unmarshal body: %v; raw=%q", err, w.Body.String())
+			}
+			if got.NodeID != "erin-node-01" {
+				t.Fatalf("node_id: got %q, want erin-node-01", got.NodeID)
+			}
+		})
+	}
+}
+
+// seedFleetNode is a test helper that puts nodeID into both halves of the
+// "user's fleet" predicate the read-side handlers depend on:
+//
+//   1. node_owners row (BindNode) — what GetUserNodes filters by.
+//   2. p.mem in-memory NodeState (pStore.Ingest) — what GetUserNodes
+//      returns when the filter passes. RecentAutoHealLogs joins against
+//      autoheal_logs and never reads from the in-memory store, so this
+//      second step is what makes GetUserNodes return a non-empty map for
+//      nodeID. BindNode alone leaves the in-memory map empty, so
+//      GetUserNodes returns map[nodeID] -> missing even though
+//      node_owners has the row — the handler then 403s with "node not
+//      in your fleet", which is correct behaviour for production (real
+//      agents only ever populate the in-memory map by sending a
+//      heartbeat) but a surprising trap for tests.
+//
+// The heartbeat is minimal: just NodeID + a populated CPU/Memory/Disks
+// so p.mem.Ingest's status heuristic doesn't blow up. No Tags /
+// Services / Probes needed.
+func seedFleetNode(t *testing.T, pStore *store.PersistentStore, uid int64, nodeID string) {
+	t.Helper()
+	if err := pStore.BindNode(nodeID, uid); err != nil {
+		t.Fatalf("BindNode %q: %v", nodeID, err)
+	}
+	pStore.Ingest(&protocol.Heartbeat{
+		NodeID:    nodeID,
+		Timestamp: time.Now().Unix(),
+		Node: protocol.NodeInfo{
+			ID:       nodeID,
+			Hostname: nodeID,
+			OS:       "linux",
+			Arch:     "amd64",
+			Version:  "test",
+		},
+		CPU: protocol.CPUStats{
+			UsagePercent: 10,
+			Load1:        0.1,
+			Load5:        0.1,
+			Load15:       0.1,
+			Cores:        2,
+		},
+		Memory: protocol.MemoryStats{
+			TotalBytes:     1 << 30,
+			AvailableBytes: 1 << 29,
+			UsedBytes:      1 << 29,
+			UsedPercent:    50,
+		},
+		Disks: []protocol.DiskStats{{
+			MountPoint: "/",
+			TotalBytes: 1 << 40,
+			FreeBytes:  1 << 39,
+			UsedPercent: 25,
+		}},
+	})
+}

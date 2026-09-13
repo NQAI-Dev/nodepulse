@@ -195,7 +195,16 @@ func main() {
 		}
 
 		invID := fmt.Sprintf("%d", inv.Result.InvoiceID)
-		pStore.SaveInvoice(invID, uid, "pro", inv.Result.Amount, inv.Result.PayURL)
+		if err := pStore.SaveInvoice(invID, uid, "pro", inv.Result.Amount, inv.Result.PayURL); err != nil {
+			// SaveInvoice now returns error (8af1a60). If the DB write fails after
+			// CryptoBot already issued an invoice, the user would pay, webhook would
+			// fire, MarkInvoicePaid would fail on lookup, and the user would silently
+			// never upgrade. 500 here surfaces the failure immediately so the user
+			// can retry instead of paying against a phantom invoice.
+			log.Printf("[billing] save invoice %s for user %s (id %d) failed: %v", invID, uname, uid, err)
+			http.Error(w, `{"error":"failed to persist invoice — please retry"}`, http.StatusInternalServerError)
+			return
+		}
 
 		log.Printf("Created invoice %s for user %s (id %d)", invID, uname, uid)
 
@@ -253,36 +262,7 @@ func main() {
 	})
 
 	mux.HandleFunc("GET /api/v1/autoheal/logs", func(w http.ResponseWriter, r *http.Request) {
-		uid, _, err := getUser(r)
-		if err != nil {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
-		nodeID := r.URL.Query().Get("node_id")
-		if nodeID == "" {
-			http.Error(w, `{"error":"node_id required"}`, http.StatusBadRequest)
-			return
-		}
-
-		limit := 50
-		if v := r.URL.Query().Get("limit"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
-				limit = n
-			}
-		}
-
-		all := pStore.GetUserNodes(uid)
-		if _, ok := all[nodeID]; !ok {
-			http.Error(w, `{"error":"node not in your fleet"}`, http.StatusForbidden)
-			return
-		}
-
-		logs := pStore.RecentAutoHealLogs(nodeID, limit)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"node_id": nodeID,
-			"events":  logs,
-		})
+		handleAutohealLogsRead(w, r, pStore)
 	})
 
 	// 4. Fleet Nodes API
@@ -1775,4 +1755,61 @@ func handleTgCallback(w http.ResponseWriter, r *http.Request, pStore *store.Pers
 	// localStorage without ever sending it to a third-party server log.
 	fragment := fmt.Sprintf("token=%s&user_id=%d&tg_id=%d", tok, uid, tgID)
 	http.Redirect(w, r, "/index.html#"+fragment, http.StatusFound)
+}
+
+// handleAutohealLogsRead serves the read-side counterpart of
+// POST /api/v1/autoheal/log: it returns the recent autoheal remediation
+// events for one of the caller's fleet nodes. Handler body lives in
+// file scope so the auth + node-scoping contracts can be unit-tested
+// without spinning up the full mux. Mirrors the installScript /
+// handleHeartbeatIngest / handleAutohealLog / handleTgCallback
+// extraction pattern.
+//
+// The previous closure captured only `getUser`, `pStore`, `json`, and
+// `strconv`; after extraction the handler calls pStore.GetUserByToken
+// directly (same auth shape as the POST side), so no closure variables
+// remain. Pure refactor, zero behavior change.
+//
+// Read-only path: no error-returning store call of its own that could
+// fail silently, but the auth + GetUserNodes-fleet filter are the real
+// security boundary here. A regression that drops the auth check or
+// skips the fleet filter would let any authenticated user enumerate
+// every node's autoheal history.
+func handleAutohealLogsRead(w http.ResponseWriter, r *http.Request, pStore *store.PersistentStore) {
+	auth := r.Header.Get("Authorization")
+	tok := strings.TrimPrefix(auth, "Bearer ")
+	if tok == "" {
+		tok = r.URL.Query().Get("token")
+	}
+	uid, _, err := pStore.GetUserByToken(tok)
+	if err != nil {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	nodeID := r.URL.Query().Get("node_id")
+	if nodeID == "" {
+		http.Error(w, `{"error":"node_id required"}`, http.StatusBadRequest)
+		return
+	}
+
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+
+	all := pStore.GetUserNodes(uid)
+	if _, ok := all[nodeID]; !ok {
+		http.Error(w, `{"error":"node not in your fleet"}`, http.StatusForbidden)
+		return
+	}
+
+	logs := pStore.RecentAutoHealLogs(nodeID, limit)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"node_id": nodeID,
+		"events":  logs,
+	})
 }
