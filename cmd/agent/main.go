@@ -29,6 +29,7 @@ func main() {
 	tagsFlag := flag.String("tags", "", "Comma-separated node tags, e.g. env=prod,region=eu,role=db")
 	dryRun := flag.Bool("dry-run", false, "Collect and print without network push")
 	probeURLs := flag.String("probe-urls", "", "Comma-separated HTTP URLs to probe on every heartbeat (e.g. https://api.example.com/health)")
+	probeTCP := flag.String("probe-tcp", "", "Comma-separated TCP targets host:port[=banner] to probe on every heartbeat (e.g. db:5432=postgres,redis:6379)")
 	probeTimeout := flag.Duration("probe-timeout", 5*time.Second, "Per-probe wall-clock timeout")
 	probeFollowRedirect := flag.Bool("probe-follow-redirect", false, "Follow HTTP 3xx redirects during probes (off by default)")
 	flag.Parse()
@@ -78,6 +79,20 @@ func main() {
 	if len(probeTargets) > 0 {
 		log.Printf("Synthetic probes enabled: %d target(s), timeout=%s, follow_redirect=%v",
 			len(prober.Targets()), *probeTimeout, *probeFollowRedirect)
+	}
+
+	tcpRaw := *probeTCP
+	if tcpRaw == "" {
+		tcpRaw = os.Getenv("NODEPULSE_PROBE_TCP")
+	}
+	tcpTargets, err := probe.ParseTCPTargets(tcpRaw)
+	if err != nil {
+		log.Fatalf("Invalid -probe-tcp value: %v", err)
+	}
+	tcpRunner := probe.NewTCPRunner(tcpTargets, *probeTimeout)
+	if len(tcpTargets) > 0 {
+		log.Printf("TCP probes enabled: %d target(s), timeout=%s",
+			len(tcpRunner.Targets()), *probeTimeout)
 	}
 
 	var pendingMu sync.Mutex
@@ -135,11 +150,19 @@ func main() {
 		// block the system metrics snapshot, but before marshal so the
 		// results ride on the same payload. Failures are isolated per
 		// target and never abort the batch.
-		if len(probeTargets) > 0 {
-			hb.Probes = prober.Run()
+		if len(probeTargets) > 0 || len(tcpTargets) > 0 {
+			var httpR, tcpR []protocol.ProbeResult
+			if len(probeTargets) > 0 {
+				httpR = prober.Run()
+			}
+			if len(tcpTargets) > 0 {
+				tcpR = tcpRunner.Run()
+			}
+			hb.Probes = probe.MergeProbeResults(httpR, tcpR)
 			for _, p := range hb.Probes {
 				if !p.OK {
-					log.Printf("Probe %s failed: status=%d err=%q", p.URL, p.StatusCode, p.Error)
+					log.Printf("Probe [%s] %s failed: status=%d err=%q",
+						defaultKind(p.Kind), p.URL, p.StatusCode, p.Error)
 				}
 			}
 		}
@@ -239,6 +262,13 @@ func boolToStatus(ok bool) string {
 		return "ok"
 	}
 	return "failed"
+}
+
+func defaultKind(k string) string {
+	if k == "" {
+		return "http"
+	}
+	return k
 }
 
 func errString(e error) string {

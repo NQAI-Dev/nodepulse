@@ -12,9 +12,12 @@ import (
 // LatencyP50/LatencyP95 are computed from raw results inside the requested
 // window so the public status page can render "API p95: 240ms" without
 // pulling every row. Total is the number of probe attempts; OK counts how
-// many returned a 2xx.
+// many returned a 2xx. Kind is the probe type ("http" or "tcp") so the
+// public status page can render the right widget without inferring it
+// from the URL scheme.
 type ProbeSummary struct {
 	URL         string  `json:"url"`
+	Kind        string  `json:"kind"`
 	WindowSecs  int64   `json:"window_secs"`
 	Total       int64   `json:"total"`
 	OK          int64   `json:"ok"`
@@ -48,7 +51,7 @@ func (p *PersistentStore) RecordProbeResults(nodeID string, results []protocol.P
 	if err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare("INSERT INTO probe_results (node_id, url, status_code, latency_ms, ok, error, ts) VALUES (?, ?, ?, ?, ?, ?, ?)")
+	stmt, err := tx.Prepare("INSERT INTO probe_results (node_id, url, kind, status_code, latency_ms, ok, error, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -59,7 +62,11 @@ func (p *PersistentStore) RecordProbeResults(nodeID string, results []protocol.P
 		if r.OK {
 			okInt = 1
 		}
-		if _, err := stmt.Exec(nodeID, r.URL, r.StatusCode, r.LatencyMs, okInt, r.Error, r.Ts); err != nil {
+		kind := r.Kind
+		if kind == "" {
+			kind = protocol.ProbeKindHTTP
+		}
+		if _, err := stmt.Exec(nodeID, r.URL, kind, r.StatusCode, r.LatencyMs, okInt, r.Error, r.Ts); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -71,6 +78,11 @@ func (p *PersistentStore) RecordProbeResults(nodeID string, results []protocol.P
 // the last `windowSecs` seconds, across all nodes. The window default of
 // 24h matches the per-day uptime widgets; pass 0 for "all time" (which
 // is the same as "ever since the janitor last pruned").
+//
+// `kindFilter` optionally restricts results to a single probe kind
+// ("http" or "tcp"); pass "" to include every kind. We bucket by URL
+// only, so when both HTTP and TCP probes hit the same "host:port"
+// target, the summary shows the most recent sample's kind.
 //
 // The query is a single GROUP BY scan over the index
 // (url, ts); we then fetch the most recent sample per URL with a
@@ -84,6 +96,18 @@ func (p *PersistentStore) RecordProbeResults(nodeID string, results []protocol.P
 // window from in-memory state, not SQLite. Today's scale makes the
 // in-Go sort the right trade-off.
 func (p *PersistentStore) ProbeSummaries(windowSecs int64) ([]ProbeSummary, error) {
+	return p.probeSummaries(windowSecs, "")
+}
+
+// ProbeSummariesByKind is the kind-filtered sibling of ProbeSummaries.
+// Empty kind returns the unfiltered view (same as ProbeSummaries);
+// unknown kinds return an empty slice without erroring so a UI typo
+// can't break the status page.
+func (p *PersistentStore) ProbeSummariesByKind(windowSecs int64, kind string) ([]ProbeSummary, error) {
+	return p.probeSummaries(windowSecs, kind)
+}
+
+func (p *PersistentStore) probeSummaries(windowSecs int64, kindFilter string) ([]ProbeSummary, error) {
 	if windowSecs <= 0 {
 		windowSecs = 86400
 	}
@@ -92,10 +116,21 @@ func (p *PersistentStore) ProbeSummaries(windowSecs int64) ([]ProbeSummary, erro
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	rows, err := p.db.Query(
-		"SELECT url, ts, status_code, latency_ms, ok, error FROM probe_results WHERE ts >= ? ORDER BY url, ts",
-		cutoff,
+	var (
+		rows *sql.Rows
+		err  error
 	)
+	if kindFilter == "" {
+		rows, err = p.db.Query(
+			"SELECT url, kind, ts, status_code, latency_ms, ok, error FROM probe_results WHERE ts >= ? ORDER BY url, ts",
+			cutoff,
+		)
+	} else {
+		rows, err = p.db.Query(
+			"SELECT url, kind, ts, status_code, latency_ms, ok, error FROM probe_results WHERE ts >= ? AND kind = ? ORDER BY url, ts",
+			cutoff, kindFilter,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -113,19 +148,26 @@ func (p *PersistentStore) ProbeSummaries(windowSecs int64) ([]ProbeSummary, erro
 		total, ok int64
 	}{}
 	for rows.Next() {
-		var url, errStr string
+		var url, errStr, kind string
 		var ts int64
 		var status, latency, okInt int
-		if err := rows.Scan(&url, &ts, &status, &latency, &okInt, &errStr); err != nil {
+		if err := rows.Scan(&url, &kind, &ts, &status, &latency, &okInt, &errStr); err != nil {
 			return nil, err
 		}
+		// We bucket by URL only — different probes (HTTP + TCP) on the
+		// same host:port are rare and would confuse the public widget.
+		// The Kind tag travels with the "last" sample so the summary
+		// picks the most recent kind for the URL.
 		b, ok := buckets[url]
 		if !ok {
 			b = &bucket{}
 			buckets[url] = b
 		}
 		b.latencies = append(b.latencies, int64(latency))
-		b.last = protocol.ProbeResult{URL: url, StatusCode: status, LatencyMs: int64(latency), OK: okInt == 1, Error: errStr, Ts: ts}
+		b.last = protocol.ProbeResult{
+			URL: url, Kind: kind, StatusCode: status,
+			LatencyMs: int64(latency), OK: okInt == 1, Error: errStr, Ts: ts,
+		}
 		c := byURL[url]
 		if c == nil {
 			c = &struct{ total, ok int64 }{}
@@ -152,6 +194,7 @@ func (p *PersistentStore) ProbeSummaries(windowSecs int64) ([]ProbeSummary, erro
 		}
 		out = append(out, ProbeSummary{
 			URL:         url,
+			Kind:        defaultKind(b.last.Kind),
 			WindowSecs:  windowSecs,
 			Total:       c.total,
 			OK:          c.ok,
@@ -223,3 +266,14 @@ func (p *PersistentStore) PurgeProbeResultsOlderThan(cutoff time.Time) (int64, e
 // other files (e.g. during partial test compilation).
 var _ = sql.ErrNoRows
 var _ sync.Mutex
+
+// defaultKind normalizes a missing/empty kind tag to "http" so the
+// public API stays backwards-compatible with rows that pre-date the
+// TCP probe feature (older rows may have kind='' depending on which
+// schema migration ran first).
+func defaultKind(k string) string {
+	if k == "" {
+		return protocol.ProbeKindHTTP
+	}
+	return k
+}

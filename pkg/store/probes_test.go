@@ -156,3 +156,82 @@ func TestPercentile(t *testing.T) {
 		}
 	}
 }
+
+func TestProbeKindIsPersistedAndFilterable(t *testing.T) {
+	store := newProbeTestStore(t)
+	now := time.Now().Unix()
+	httpR := []protocol.ProbeResult{
+		{URL: "https://api.example/health", Kind: protocol.ProbeKindHTTP, StatusCode: 200, LatencyMs: 90, OK: true, Ts: now - 30},
+	}
+	tcpR := []protocol.ProbeResult{
+		{URL: "db:5432", Kind: protocol.ProbeKindTCP, LatencyMs: 12, OK: true, Ts: now - 20},
+		{URL: "cache:6379", Kind: protocol.ProbeKindTCP, LatencyMs: 5, OK: false, Error: "connection_refused", Ts: now - 10},
+	}
+	if err := store.RecordProbeResults("node-1", httpR); err != nil {
+		t.Fatalf("http record: %v", err)
+	}
+	if err := store.RecordProbeResults("node-1", tcpR); err != nil {
+		t.Fatalf("tcp record: %v", err)
+	}
+
+	all, err := store.ProbeSummaries(3600)
+	if err != nil {
+		t.Fatalf("ProbeSummaries: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("all summaries len = %d, want 3", len(all))
+	}
+	byURL := map[string]ProbeSummary{}
+	for _, s := range all {
+		byURL[s.URL] = s
+	}
+	if byURL["https://api.example/health"].Kind != protocol.ProbeKindHTTP {
+		t.Errorf("http kind = %q, want %q", byURL["https://api.example/health"].Kind, protocol.ProbeKindHTTP)
+	}
+	if byURL["db:5432"].Kind != protocol.ProbeKindTCP {
+		t.Errorf("tcp kind = %q, want %q", byURL["db:5432"].Kind, protocol.ProbeKindTCP)
+	}
+
+	tcpOnly, err := store.ProbeSummariesByKind(3600, protocol.ProbeKindTCP)
+	if err != nil {
+		t.Fatalf("ProbeSummariesByKind: %v", err)
+	}
+	if len(tcpOnly) != 2 {
+		t.Errorf("tcp-only len = %d, want 2", len(tcpOnly))
+	}
+	for _, s := range tcpOnly {
+		if s.Kind != protocol.ProbeKindTCP {
+			t.Errorf("tcp-only summary kind = %q for %s, want tcp", s.Kind, s.URL)
+		}
+	}
+
+	// Unknown kind returns empty, not error.
+	none, err := store.ProbeSummariesByKind(3600, "icmp")
+	if err != nil {
+		t.Errorf("ProbeSummariesByKind(icmp) err = %v, want nil", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("icmp summaries len = %d, want 0", len(none))
+	}
+}
+
+func TestRecordProbeResultsDefaultsKindToHTTP(t *testing.T) {
+	store := newProbeTestStore(t)
+	now := time.Now().Unix()
+	// Kind intentionally omitted — pre-TCP-probe agents send this shape
+	// and the store must keep treating them as HTTP on disk.
+	r := []protocol.ProbeResult{
+		{URL: "https://legacy.example/health", StatusCode: 200, OK: true, Ts: now - 10},
+	}
+	if err := store.RecordProbeResults("node-1", r); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	all, _ := store.ProbeSummaries(3600)
+	if len(all) != 1 {
+		t.Fatalf("len = %d, want 1", len(all))
+	}
+	if all[0].Kind != protocol.ProbeKindHTTP {
+		t.Errorf("legacy kind = %q, want %q (legacy rows must default to http)",
+			all[0].Kind, protocol.ProbeKindHTTP)
+	}
+}

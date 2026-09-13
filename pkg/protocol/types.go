@@ -113,9 +113,23 @@ type AutoHealLog struct {
 // with a flat struct.
 type ProbeResult struct {
 	URL        string `json:"url"`
+	// Kind is the probe type that produced this result. Empty values are
+	// treated as "http" so the field stays backwards-compatible with
+	// agents that pre-date the TCP-probe feature. The control plane uses
+	// it to render the right widget on the public status page and to
+	// skip HTTP-only fields (StatusCode) for TCP probes.
+	Kind       string `json:"kind,omitempty"`
 	StatusCode int    `json:"status_code"`
 	LatencyMs  int64  `json:"latency_ms"`
 	OK         bool   `json:"ok"`
 	Error      string `json:"error,omitempty"`
 	Ts         int64  `json:"ts"`
 }
+
+// Probe kinds used by agents and the control plane. Keep this list short
+// and stable — values are persisted in SQLite and rendered verbatim on the
+// public status page.
+const (
+	ProbeKindHTTP = "http"
+	ProbeKindTCP  = "tcp"
+)

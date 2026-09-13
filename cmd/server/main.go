@@ -473,7 +473,17 @@ func main() {
 				windowSecs = n
 			}
 		}
-		summaries, err := pStore.ProbeSummaries(windowSecs)
+		// Optional kind filter (http|tcp). Unknown values yield an empty
+		// list rather than 400 — the public page should never break on
+		// a typo in an upstream URL parameter.
+		kind := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("kind")))
+		var summaries []store.ProbeSummary
+		var err error
+		if kind == "" {
+			summaries, err = pStore.ProbeSummaries(windowSecs)
+		} else {
+			summaries, err = pStore.ProbeSummariesByKind(windowSecs, kind)
+		}
 		if err != nil {
 			http.Error(w, `{"error":"probes query failed"}`, http.StatusInternalServerError)
 			return

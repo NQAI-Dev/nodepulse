@@ -168,10 +168,10 @@
 
         <div class="card">
             <div class="card-title">
-                <span>Synthetic HTTP probes</span>
+                <span>Synthetic probes</span>
                 <span id="probes-count" style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-secondary);">--</span>
             </div>
-            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 12px;">Агенты NodePulse периодически опрашивают внешние эндпоинты и публикуют uptime / latency (24ч).</p>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 12px;">Агенты NodePulse периодически опрашивают внешние HTTP-эндпоинты и TCP-порты и публикуют uptime / latency (24ч).</p>
             <div id="probes-list">
                 <p style="color: var(--text-secondary); font-size: 0.9rem;">Нет активных пробов.</p>
             </div>
@@ -278,7 +278,19 @@
                                                  p.uptime_pct >= 99.0 ? 'var(--accent-yellow)' :
                                                  'var(--accent-red)';
                                 const ok = p.last_ok;
-                                const lastStatus = p.last_status === 0 ? '—' : p.last_status;
+                                const kind = (p.kind || 'http');
+                                const kindPill = kind === 'tcp'
+                                    ? '<span class="pill" style="background: rgba(99,179,237,0.18); color: #63b3ed; min-width: 32px; text-align: center; font-size: 0.7rem;">TCP</span>'
+                                    : '<span class="pill" style="background: rgba(154,230,180,0.18); color: #9ae6b4; min-width: 32px; text-align: center; font-size: 0.7rem;">HTTP</span>';
+                                // TCP probes don't carry a status code; render
+                                // "open" / the error string instead so the
+                                // status page is self-explanatory.
+                                let lastStatus;
+                                if (kind === 'tcp') {
+                                    lastStatus = ok ? 'open' : (p.last_status === 0 ? '—' : String(p.last_status));
+                                } else {
+                                    lastStatus = p.last_status === 0 ? '—' : p.last_status;
+                                }
                                 const url = p.url.replace(/^https?:\/\//, '');
                                 const lastAgo = p.last_ts ? Math.max(0, Math.floor((Date.now()/1000 - p.last_ts) / 60)) : null;
                                 const agoTxt = lastAgo === null ? '' : lastAgo < 1 ? '<1m' : lastAgo < 60 ? `${lastAgo}m` : `${Math.floor(lastAgo/60)}h`;
@@ -291,6 +303,7 @@
                                         </div>
                                     </div>
                                     <div style="display: flex; align-items: center; gap: 10px; flex-shrink: 0;">
+                                        ${kindPill}
                                         <span class="pill" style="background: rgba(139, 148, 158, 0.15); color: var(--text-secondary); min-width: 38px; text-align: center;">${lastStatus}</span>
                                         <div style="width: 80px; height: 8px; background: var(--bg-base); border-radius: 4px; overflow: hidden;">
                                             <div style="width: ${Math.max(0, Math.min(100, p.uptime_pct))}%; height: 100%; background: ${barColor};"></div>
