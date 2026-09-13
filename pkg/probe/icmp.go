@@ -302,16 +302,13 @@ func icmpChecksum(b []byte) uint16 {
 	return ^uint16(sum)
 }
 
-// readOneEcho waits for one matching ICMP echo reply on conn. The
-// kernel returns the IP header followed by the ICMP header for
-// SOCK_RAW, so we strip 20 bytes (IPv4 header without options) and
-// inspect type=0 (echo reply), id, seq. We also tolerate ECHO
-// replies for packets the kernel forwarded (i.e., the kernel
-// reassembled a fragmented echo and sends a single reply) — those
-// arrive as a fresh echo-reply with the right id/seq.
+// readOneEcho waits for one matching ICMP echo reply on conn.
 //
-// Anything else (TTL exceeded, destination unreachable, etc.) is
-// ignored so we wait for the actual reply up to the ctx deadline.
+// Go's net.ListenPacket("ip4:icmp", ...) on Linux returns packets
+// starting directly at the ICMP header (type, code, checksum, id, seq),
+// WITHOUT the 20-byte IPv4 header. If an IPv4 header is present (e.g. on
+// raw IP sockets returning full IP frames where buf[0] == 0x45), we strip
+// the IP header len. Otherwise we inspect directly from byte 0.
 func readOneEcho(ctx context.Context, conn net.PacketConn, id, seq uint16) error {
 	buf := make([]byte, 1500)
 	deadline, hasDeadline := ctx.Deadline()
@@ -323,11 +320,11 @@ func readOneEcho(ctx context.Context, conn net.PacketConn, id, seq uint16) error
 		if err != nil {
 			return err
 		}
-		// Strip IPv4 header (20 bytes, no options assumed).
-		if n < 20+8 {
+
+		pkt := extractICMPPayload(buf[:n])
+		if len(pkt) < 8 {
 			continue
 		}
-		pkt := buf[20:n]
 		if pkt[0] != 0 { // type 0 = echo reply
 			continue
 		}
@@ -340,6 +337,20 @@ func readOneEcho(ctx context.Context, conn net.PacketConn, id, seq uint16) error
 		return nil
 	}
 }
+
+// extractICMPPayload normalizes incoming buffer into ICMP payload.
+// If an IPv4 header is prepended (version 4, protocol 1), it strips the header using IHL.
+func extractICMPPayload(buf []byte) []byte {
+	n := len(buf)
+	if n >= 20+8 && (buf[0]>>4) == 4 && buf[9] == 1 { // IP version 4, protocol 1 (ICMP)
+		ihl := int(buf[0]&0x0f) * 4
+		if n >= ihl+8 {
+			return buf[ihl:]
+		}
+	}
+	return buf
+}
+
 
 // classifyICMPDialErr maps the most common socket-open errors to
 // short, status-page-friendly strings. The two interesting ones are

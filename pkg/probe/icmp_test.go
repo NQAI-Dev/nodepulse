@@ -197,3 +197,28 @@ type timeoutErr_ struct{}
 
 func (timeoutErr_) Error() string  { return "i/o timeout" }
 func (timeoutErr_) Timeout() bool { return true }
+
+func TestExtractICMPEchoReply(t *testing.T) {
+	// 1. Raw ICMP packet without IP header (typical for Linux ip4:icmp ListenPacket)
+	// Echo reply: type=0, code=0, cksum, id=0x1234, seq=0x0001
+	rawICMP := []byte{0x00, 0x00, 0x00, 0x00, 0x12, 0x34, 0x00, 0x01, 0xAA, 0xBB}
+	pkt := extractICMPPayload(rawICMP)
+	if len(pkt) != len(rawICMP) || pkt[0] != 0 || pkt[4] != 0x12 || pkt[5] != 0x34 {
+		t.Fatalf("extractICMPPayload(rawICMP) failed: %v", pkt)
+	}
+
+	// 2. Full IPv4 frame with 20-byte IP header prepended (IPv4 proto=1 ICMP)
+	ipHeader := []byte{
+		0x45, 0x00, 0x00, 0x20, // ver=4, ihl=5 (20 bytes)
+		0x00, 0x00, 0x00, 0x00,
+		0x40, 0x01, 0x00, 0x00, // ttl=64, proto=1 (ICMP)
+		127, 0, 0, 1,
+		127, 0, 0, 1,
+	}
+	framed := append(ipHeader, rawICMP...)
+	pktFramed := extractICMPPayload(framed)
+	if len(pktFramed) != len(rawICMP) || pktFramed[0] != 0 || pktFramed[4] != 0x12 || pktFramed[5] != 0x34 {
+		t.Fatalf("extractICMPPayload(framed) failed: %v", pktFramed)
+	}
+}
+
