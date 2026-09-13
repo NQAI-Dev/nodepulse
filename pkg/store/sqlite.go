@@ -266,7 +266,6 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		node_id TEXT NOT NULL,
 		url TEXT NOT NULL,
-		kind TEXT NOT NULL DEFAULT 'http',
 		status_code INTEGER NOT NULL DEFAULT 0,
 		latency_ms INTEGER NOT NULL DEFAULT 0,
 		ok INTEGER NOT NULL DEFAULT 0,
@@ -275,22 +274,29 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	);
 	CREATE INDEX IF NOT EXISTS idx_probes_url_ts ON probe_results(url, ts);
 	CREATE INDEX IF NOT EXISTS idx_probes_node_ts ON probe_results(node_id, ts);
-	CREATE INDEX IF NOT EXISTS idx_probes_kind_ts ON probe_results(kind, ts);
 	`
 	if _, err := db.Exec(uptimeSchema); err != nil {
 		return nil, err
 	}
 
 	// Forward-compat migration: pre-TCP-probe fleets have probe_results
-	// tables without the `kind` column. Older deployments may have
-	// opened the DB before this column was added; CREATE TABLE IF NOT
-	// EXISTS leaves the existing schema untouched, so we explicitly try
-	// to add the column and tolerate "duplicate column name" — the only
-	// other failure mode is a real I/O error worth surfacing.
+	// tables without the `kind` column. CREATE TABLE IF NOT EXISTS
+	// leaves the existing schema untouched, so we add the column and
+	// the kind-keyed index in their own statements after the bulk
+	// CREATE block. Tolerating "duplicate column name" / "duplicate
+	// index name" lets us re-run the migration on already-upgraded
+	// databases without erroring out. Note: the previous attempt put
+	// both CREATE INDEX idx_probes_kind_ts and the ALTER inside the
+	// bulk block, which crashed the upgrade path on any pre-existing
+	// database (the index references a column the ALTER hadn't added
+	// yet). Keep the index out of uptimeSchema.
 	if _, err := db.Exec("ALTER TABLE probe_results ADD COLUMN kind TEXT NOT NULL DEFAULT 'http'"); err != nil {
 		if !strings.Contains(err.Error(), "duplicate column name") {
 			return nil, err
 		}
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_probes_kind_ts ON probe_results(kind, ts)"); err != nil {
+		return nil, err
 	}
 
 	wh := alerter.NewWebhook()
