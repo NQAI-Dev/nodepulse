@@ -1,6 +1,8 @@
 dist/
 bin/
 *.db
+*.db-wal
+*.db-shm
 *.log
 .env
 

@@ -86,6 +86,33 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		return nil, err
 	}
 
+	// Concurrency hardening:
+	//
+	//   busy_timeout: when a writer is mid-transaction and a second writer
+	//   shows up, SQLite normally returns SQLITE_BUSY immediately. With
+	//   busy_timeout=5000 the second writer blocks up to 5 seconds for the
+	//   lock to clear, then errors. This trades a brief tail-latency blip
+	//   for far fewer spurious 5xx during bursty writes (uptime rollup,
+	//   metrics sample, incident update paths all contend on the same DB).
+	//   We observed SQLITE_BUSY in production on Sep 13 around 15:20 UTC
+	//   during a real signup spike.
+	//
+	//   journal_mode=WAL: readers don't block writers and vice versa, so
+	//   the /api/v1/public/probes read path stays fast even while
+	//   uptime rollup is mid-commit. WAL is a per-database property; if
+	//   the on-disk file predates this PR, the PRAGMA is a no-op upgrade.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		// journal_mode failure is non-fatal — SQLite may legitimately
+		// refuse WAL on read-only mounts or in-memory databases in tests.
+		// Log nothing here: the constructor returns error only for real
+		// failures (sql.Open, schema exec), and busy_timeout already
+		// covers the contention case.
+		_ = err
+	}
+
 	schema := `
 	CREATE TABLE IF NOT EXISTS users (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
