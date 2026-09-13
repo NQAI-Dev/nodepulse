@@ -16,8 +16,12 @@ func (p *PersistentStore) getSettingsLocked(userID int64) (*protocol.UserSetting
 	var s protocol.UserSettings
 	var crit, warn int
 	err := p.db.QueryRow(`
-		SELECT telegram_chat_id, webhook_url, webhook_secret, notify_critical, notify_warning
-		FROM user_settings WHERE user_id = ?`, userID).Scan(&s.TelegramChatID, &s.WebhookURL, &s.WebhookSecret, &crit, &warn)
+		SELECT telegram_chat_id, webhook_url, webhook_secret,
+		       COALESCE(slack_webhook_url, ''), COALESCE(discord_webhook_url, ''),
+		       notify_critical, notify_warning
+		FROM user_settings WHERE user_id = ?`, userID).
+		Scan(&s.TelegramChatID, &s.WebhookURL, &s.WebhookSecret,
+			&s.SlackWebhookURL, &s.DiscordWebhookURL, &crit, &warn)
 	if err == sql.ErrNoRows {
 		return &protocol.UserSettings{
 			NotifyCritical: true,
@@ -32,7 +36,12 @@ func (p *PersistentStore) getSettingsLocked(userID int64) (*protocol.UserSetting
 	return &s, nil
 }
 
-func (p *PersistentStore) UpdateSettings(userID int64, tgChatID, webhookURL, webhookSecret string, crit, warn bool) error {
+// UpdateSettings persists the user's alert routing. Slack and Discord
+// channels are accepted as raw incoming-webhook URLs and stored verbatim;
+// the dispatch layer enforces format validity (https://, sensible host)
+// at send time so a misconfigured URL surfaces as a per-event delivery
+// error rather than crashing the request path.
+func (p *PersistentStore) UpdateSettings(userID int64, tgChatID, webhookURL, webhookSecret, slackURL, discordURL string, crit, warn bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -46,15 +55,19 @@ func (p *PersistentStore) UpdateSettings(userID int64, tgChatID, webhookURL, web
 	}
 
 	_, err := p.db.Exec(`
-		INSERT INTO user_settings (user_id, telegram_chat_id, webhook_url, webhook_secret, notify_critical, notify_warning)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO user_settings (user_id, telegram_chat_id, webhook_url, webhook_secret,
+		                           slack_webhook_url, discord_webhook_url,
+		                           notify_critical, notify_warning)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id) DO UPDATE SET
 			telegram_chat_id = excluded.telegram_chat_id,
 			webhook_url = excluded.webhook_url,
 			webhook_secret = excluded.webhook_secret,
+			slack_webhook_url = excluded.slack_webhook_url,
+			discord_webhook_url = excluded.discord_webhook_url,
 			notify_critical = excluded.notify_critical,
 			notify_warning = excluded.notify_warning`,
-		userID, tgChatID, webhookURL, webhookSecret, critInt, warnInt)
+		userID, tgChatID, webhookURL, webhookSecret, slackURL, discordURL, critInt, warnInt)
 	return err
 }
 

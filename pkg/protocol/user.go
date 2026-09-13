@@ -16,12 +16,28 @@ type AuthResponse struct {
 	User  User   `json:"user"`
 }
 
+// UserSettings is the per-user alerting config: which channels should
+// receive which kinds of incidents, plus credentials for the chat-style
+// targets. NotifyCritical / NotifyWarning toggle the *severity* filter —
+// every channel still obeys the gate, so disabling NotifyWarning silences
+// warning-class alerts across Telegram, Slack, Discord and the generic
+// webhook in one go.
+//
+// SlackWebhookURL / DiscordWebhookURL are optional convenience channels
+// pointed at the team's chat workspace. Their payload format is chat-native
+// (Slack block kit / Discord embeds) so the alert renders correctly
+// without the operator standing up an adapter service. Both are signed
+// using the channel's own convention (Slack x-slack-signing-secret header
+// is unsupported here; Discord has no built-in signing) so operators
+// should treat the URLs as secrets and rotate via the settings endpoint.
 type UserSettings struct {
-	TelegramChatID string `json:"telegram_chat_id"`
-	WebhookURL     string `json:"webhook_url"`
-	WebhookSecret  string `json:"webhook_secret,omitempty"`
-	NotifyCritical bool   `json:"notify_critical"`
-	NotifyWarning  bool   `json:"notify_warning"`
+	TelegramChatID    string `json:"telegram_chat_id"`
+	WebhookURL        string `json:"webhook_url"`
+	WebhookSecret     string `json:"webhook_secret,omitempty"`
+	SlackWebhookURL   string `json:"slack_webhook_url,omitempty"`
+	DiscordWebhookURL string `json:"discord_webhook_url,omitempty"`
+	NotifyCritical    bool   `json:"notify_critical"`
+	NotifyWarning     bool   `json:"notify_warning"`
 }
 
 // MaintenanceWindow describes a planned silence period during which alerts

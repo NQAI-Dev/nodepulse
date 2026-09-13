@@ -54,6 +54,12 @@ func main() {
 	}
 	pStore.InitBillingSchema()
 
+	// Wire Slack + Discord fan-out. The chat dispatcher reuses the
+	// WebhookRecorder owned by the store so audit rows land in the
+	// same buffer as the generic webhook deliveries — operators get a
+	// single /api/v1/webhook/deliveries feed across all four channels.
+	pStore.SetChatDispatcher(alerter.NewChatDispatcher(pStore.Recorder()))
+
 	// Enable HMAC-signed inline-keyboard callback_data. Reuse the bot token
 	// as the shared secret so signing/verification works out of the box;
 	// operators can override with NODEPULSE_TG_CALLBACK_SECRET if they ever
@@ -722,7 +728,7 @@ func main() {
 			http.Error(w, `{"error":"invalid settings payload"}`, http.StatusBadRequest)
 			return
 		}
-		if err := pStore.UpdateSettings(uid, req.TelegramChatID, req.WebhookURL, req.WebhookSecret, req.NotifyCritical, req.NotifyWarning); err != nil {
+		if err := pStore.UpdateSettings(uid, req.TelegramChatID, req.WebhookURL, req.WebhookSecret, req.SlackWebhookURL, req.DiscordWebhookURL, req.NotifyCritical, req.NotifyWarning); err != nil {
 			http.Error(w, `{"error":"failed to update settings"}`, http.StatusInternalServerError)
 			return
 		}
@@ -743,15 +749,22 @@ func main() {
 			return
 		}
 		var req struct {
-			Channel   string `json:"channel"` // "telegram", "webhook", or "all"
+			Channel   string `json:"channel"` // "telegram", "webhook", "slack", "discord", or "all"
 			ChatID    string `json:"chat_id"`
 			WebhookURL string `json:"webhook_url"`
 			WebhookSecret string `json:"webhook_secret"`
+			SlackURL    string `json:"slack_url"`
+			DiscordURL  string `json:"discord_url"`
+			NodeID      string `json:"node_id"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		channel := req.Channel
 		if channel == "" {
 			channel = "all"
+		}
+		nodeID := req.NodeID
+		if nodeID == "" {
+			nodeID = "(unknown)"
 		}
 
 		settings, err := pStore.GetSettings(uid)
@@ -802,6 +815,46 @@ func main() {
 				results = append(results, channelResult{Channel: "webhook", OK: false, Error: err.Error()})
 			} else {
 				results = append(results, channelResult{Channel: "webhook", OK: true})
+			}
+		}
+
+		// Slack + Discord test branches. The chat dispatcher is optional
+		// (older binaries / tests don't wire it); the saved URLs come from
+		// settings unless the operator passes overrides for one-off testing
+		// against a second workspace.
+		if chat := pStore.ChatDispatcher(); chat != nil {
+			if channel == "slack" || channel == "all" {
+				slackURL := req.SlackURL
+				if slackURL == "" {
+					slackURL = settings.SlackWebhookURL
+				}
+				if slackURL == "" {
+					results = append(results, channelResult{Channel: "slack", OK: false, Error: "slack webhook URL is empty"})
+				} else if err := chat.SendTest("slack", slackURL, nodeID); err != nil {
+					results = append(results, channelResult{Channel: "slack", OK: false, Error: err.Error()})
+				} else {
+					results = append(results, channelResult{Channel: "slack", OK: true})
+				}
+			}
+			if channel == "discord" || channel == "all" {
+				discordURL := req.DiscordURL
+				if discordURL == "" {
+					discordURL = settings.DiscordWebhookURL
+				}
+				if discordURL == "" {
+					results = append(results, channelResult{Channel: "discord", OK: false, Error: "discord webhook URL is empty"})
+				} else if err := chat.SendTest("discord", discordURL, nodeID); err != nil {
+					results = append(results, channelResult{Channel: "discord", OK: false, Error: err.Error()})
+				} else {
+					results = append(results, channelResult{Channel: "discord", OK: true})
+				}
+			}
+		} else if channel == "slack" || channel == "discord" || channel == "all" {
+			if channel == "slack" || channel == "all" {
+				results = append(results, channelResult{Channel: "slack", OK: false, Error: "chat dispatcher not configured on server"})
+			}
+			if channel == "discord" || channel == "all" {
+				results = append(results, channelResult{Channel: "discord", OK: false, Error: "chat dispatcher not configured on server"})
 			}
 		}
 
@@ -1325,6 +1378,27 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(stats)
+	})
+
+	// Chat-channel stats: in-memory counter snapshot from the chat
+	// dispatcher. Keyed by host (no full URLs leak) so an on-call
+	// engineer can see which Slack workspace is dropping pings. Returns
+	// an empty object if chat channels are not configured (legacy
+	// binary) — clients should treat empty as "not in use".
+	mux.HandleFunc("GET /api/v1/dispatch/stats", func(w http.ResponseWriter, r *http.Request) {
+		if _, _, err := getUser(r); err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		var slack, discord map[string]alerter.ChatChannelStats
+		if cd := pStore.ChatDispatcher(); cd != nil {
+			slack, discord = cd.ChannelStats()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"slack":   slack,
+			"discord": discord,
+		})
 	})
 
 	// 8b. Manual retry of a previously-failed webhook delivery. Looks up the

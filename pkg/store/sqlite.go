@@ -23,6 +23,11 @@ type PersistentStore struct {
 	alerter       alerter.Notifier
 	webhook       *alerter.WebhookDispatcher
 	whRecorder    *alerter.WebhookRecorder // audit-trail wrapper around webhook
+	// chatDispatch fans an incident out to Slack + Discord incoming
+	// webhooks. Optional — nil disables the chat path entirely so older
+	// binaries and tests without chat routing don't have to fake the
+	// dispatcher. Set via SetChatDispatcher from cmd/server at startup.
+	chatDispatch  *alerter.ChatDispatcher
 	defaultChatID int64 // remembered at construction so we can target the configured chat without asking the Notifier
 	uptime        *uptimeTracker
 	netRates      *networkRateTracker
@@ -49,6 +54,25 @@ func (p *PersistentStore) SetNotifier(n alerter.Notifier) {
 	p.alerter = n
 }
 
+// SetChatDispatcher attaches the Slack + Discord fan-out. Optional;
+// nil disables both channels. The dispatcher reuses the same
+// WebhookRecorder that the generic webhook side uses for audit rows,
+// so this setter only stores the dispatcher reference.
+func (p *PersistentStore) SetChatDispatcher(c *alerter.ChatDispatcher) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.chatDispatch = c
+}
+
+// ChatDispatcher exposes the optional chat fan-out for the operator
+// stats endpoint. May be nil if the server was started without chat
+// channels wired (legacy binary, test harness).
+func (p *PersistentStore) ChatDispatcher() *alerter.ChatDispatcher {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.chatDispatch
+}
+
 func HashPassword(pwd string) string {
 	h := sha256.Sum256([]byte(pwd))
 	return hex.EncodeToString(h[:])
@@ -73,6 +97,8 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		telegram_chat_id TEXT DEFAULT '',
 		webhook_url TEXT DEFAULT '',
 		webhook_secret TEXT DEFAULT '',
+		slack_webhook_url TEXT DEFAULT '',
+		discord_webhook_url TEXT DEFAULT '',
 		notify_critical INTEGER DEFAULT 1,
 		notify_warning INTEGER DEFAULT 1,
 		FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -138,6 +164,15 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	// Telegram inline-keyboard snooze shortcut; the alert path checks it
 	// inside notifyAfterCreate so no extra round-trip is needed.
 	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN snoozed_until INTEGER DEFAULT 0")
+
+	// chat-webhook channels: Slack Incoming Webhook URLs and Discord
+	// Webhook URLs are stored on user_settings so operators don't have
+	// to spin their own signed endpoint like with the generic webhook.
+	// "duplicate column name" failures on already-migrated DBs are
+	// swallowed silently, matching the style of the other ALTER TABLE
+	// calls in this block.
+	_, _ = db.Exec("ALTER TABLE user_settings ADD COLUMN slack_webhook_url TEXT DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE user_settings ADD COLUMN discord_webhook_url TEXT DEFAULT ''")
 
 	// incident_notes: free-form operator comments attached to an incident.
 	// Rendered alongside the existing audit timeline (ack/resolve events)
@@ -704,6 +739,40 @@ func (p *PersistentStore) notifyAfterCreate(incidentID, nodeID, severity, title,
 			p.webhook.DispatchSigned(settings.WebhookURL, settings.WebhookSecret, whEvent)
 		}
 	}
+
+	// Chat fanout: Slack + Discord incoming webhooks. The chat dispatcher
+	// is optional; if nil (older binary, no chat configured) we simply
+	// skip the block. Both URLs are short-circuited independently so a
+	// Slack misconfig never blocks Discord (and vice versa). The
+	// dispatcher's audit row lands in the same recorder the webhook side
+	// uses, so the existing /api/v1/webhook/deliveries endpoint shows
+	// all three channels in one place.
+	if p.chatDispatch != nil {
+		p.chatDispatch.DispatchIncident(*settings, protocol.Incident{
+			ID:        incidentID,
+			NodeID:    nodeID,
+			Severity:  severity,
+			Title:     title,
+			Detail:    detail,
+			StartedAt: ts,
+		})
+	}
+}
+
+// NotifyChatResolved is the public surface used by the auto-resolve
+// path to fan a green-tick message out to Slack/Discord. Mirrors the
+// fanout block in notifyAfterCreate but takes the incident row directly
+// so the resolved path doesn't need to re-fetch.
+func (p *PersistentStore) NotifyChatResolved(inc protocol.Incident) {
+	if p.chatDispatch == nil {
+		return
+	}
+	ownerID, _ := p.GetNodeOwner(inc.NodeID)
+	settings, _ := p.getSettingsLocked(ownerID)
+	if settings == nil {
+		return
+	}
+	p.chatDispatch.DispatchResolved(*settings, inc)
 }
 
 // ResolveIncident marks an incident resolved. Returns ErrIncidentNotOwned when

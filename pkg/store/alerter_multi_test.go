@@ -22,7 +22,7 @@ func TestIncidentDispatcherRouting(t *testing.T) {
 	s.BindNode("node-alice", uid)
 
 	// Update settings with a webhook url
-	err = s.UpdateSettings(uid, "123456", "https://example.com/webhook", "shh", true, true)
+	err = s.UpdateSettings(uid, "123456", "https://example.com/webhook", "shh", "https://hooks.slack.com/services/X", "https://discord.com/api/webhooks/1/a", true, true)
 	if err != nil {
 		t.Fatalf("failed to update settings: %v", err)
 	}

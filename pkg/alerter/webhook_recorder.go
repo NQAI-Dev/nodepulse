@@ -54,6 +54,15 @@ func (r *WebhookRecorder) DroppedTotal() uint64 { return r.droppedTotal.Load() }
 // FlushedTotal returns the count of audit rows handed off to the store.
 func (r *WebhookRecorder) FlushedTotal() uint64 { return r.flushedTotal.Load() }
 
+// Record is the public surface for sister dispatchers (chat) to push
+// their own audit rows into the same buffer the webhook side uses.
+// Drops silently if the buffer is saturated; the dropped-counter is
+// bumped so an operator can see the gap on the /api/v1/webhook/stats
+// endpoint.
+func (r *WebhookRecorder) Record(d protocol.WebhookDelivery) {
+	r.record(d)
+}
+
 // record appends a delivery outcome. Drops silently if the buffer is full.
 func (r *WebhookRecorder) record(d protocol.WebhookDelivery) {
 	r.mu.Lock()
