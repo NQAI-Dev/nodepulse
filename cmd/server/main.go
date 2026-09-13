@@ -1511,6 +1511,14 @@ echo "==> [NodePulse] Agent installed and registered successfully as ${NODE_ID}!
 		http.ServeFile(w, r, "web/public/status.html")
 	})
 
+	mux.HandleFunc("GET /landing", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "web/public/landing.html")
+	})
+
+	mux.HandleFunc("GET /welcome", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/landing", http.StatusFound)
+	})
+
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok","system":"nodepulse-platform"}` + "\n"))
