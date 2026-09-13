@@ -295,6 +295,28 @@
         let currentPlanUsage = null;
         let isRegisterMode = false;
 
+        // Telegram Login Widget callback handoff. The widget posts the
+        // validated tg_id / hash to /api/v1/tg-callback, which issues a
+        // fresh api_token and 302-redirects to /index.html#token=…&user_id=…
+        // &tg_id=… so the secret stays in the URL fragment (never sent to
+        // any third-party log). Pick it up here, stash into localStorage,
+        // strip the fragment, and reload so every other auth-aware piece
+        // of the dashboard re-renders against the new token.
+        (function pickupTelegramLogin() {
+            if (!window.location.hash || !window.location.hash.includes('token=')) return;
+            const params = new URLSearchParams(window.location.hash.slice(1));
+            const token = params.get('token');
+            if (!token) return;
+            currentAuth = {
+                token: token,
+                user_id: params.get('user_id') || '',
+                tg_id: params.get('tg_id') || '',
+            };
+            localStorage.setItem('np_auth', JSON.stringify(currentAuth));
+            history.replaceState(null, '', window.location.pathname + window.location.search);
+            window.location.reload();
+        })();
+
         async function loadPlan() {
             if (!currentAuth) {
                 document.getElementById('pricing-banner').style.display = 'none';
