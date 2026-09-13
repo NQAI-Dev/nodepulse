@@ -1540,45 +1540,16 @@ func main() {
 		fmt.Fprintf(w, `{"deleted":%t}`+"\n", deleted)
 	})
 
-	// 6. Dynamic 1-line installation script generator
+	// 6. Dynamic 1-line installation script generator.
+	//
+	// Token must be supplied via ?token= and must validate against the
+	// api_tokens table. We deliberately refuse to fall back to the master
+	// admin token: a bare /install.sh would otherwise leak the master token
+	// in plain text and silently register the resulting agent under admin,
+	// which would break per-user tenant isolation for any user who runs the
+	// dashboard URL without their own token (or anyone who runs the bare URL).
 	mux.HandleFunc("GET /install.sh", func(w http.ResponseWriter, r *http.Request) {
-		token := r.URL.Query().Get("token")
-		if token == "" {
-			token = "np_live_master_secret"
-		}
-		w.Header().Set("Content-Type", "text/x-shellscript")
-		script := fmt.Sprintf(`#!/bin/sh
-set -e
-echo "==> [NodePulse] Installing NodePulse Enterprise Agent..."
-SERVER_URL="https://pulse.nqai.es-cloud.ru"
-TOKEN="%s"
-NODE_ID="$(hostname)"
-
-mkdir -p /opt/nodepulse /etc/nodepulse
-curl -sSL -o /usr/local/bin/nodepulse-agent ${SERVER_URL}/bin/nodepulse-agent || true
-chmod +x /usr/local/bin/nodepulse-agent
-
-cat << UNIT > /etc/systemd/system/nodepulse-agent.service
-[Unit]
-Description=NodePulse Enterprise Agent
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/nodepulse-agent -node ${NODE_ID} -server ${SERVER_URL}/api/v1/ingest
-Environment=NODEPULSE_TOKEN=%s
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-systemctl daemon-reload
-systemctl enable --now nodepulse-agent.service
-echo "==> [NodePulse] Agent installed and registered successfully as ${NODE_ID}!"
-`, token, token)
-		w.Write([]byte(script))
+		installScript(w, r, pStore.ValidateToken)
 	})
 
 	mux.HandleFunc("GET /bin/nodepulse-agent", func(w http.ResponseWriter, r *http.Request) {
@@ -1656,4 +1627,64 @@ func probeURLs(results []protocol.ProbeResult) []string {
 		out = append(out, r.URL)
 	}
 	return out
+}
+
+// installScript serves a per-user agent install script for GET /install.sh.
+//
+// The script must only be served after a valid api_tokens row is presented,
+// otherwise unauthenticated requests would leak the master admin token in
+// the rendered shell script and any agent installed from a leaked URL would
+// register under admin instead of the requesting user — breaking per-user
+// tenant isolation.
+//
+// validateToken should return true exactly for tokens that exist in the
+// api_tokens table (or the literal master admin token; both branches are
+// safe because the master token still uniquely identifies the admin user
+// and is itself never returned by this endpoint without a prior valid
+// request).
+func installScript(w http.ResponseWriter, r *http.Request, validateToken func(string) bool) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		http.Error(w, "missing ?token=<your-api-token> \u2014 log in at https://pulse.nqai.es-cloud.ru/ to obtain one", http.StatusBadRequest)
+		return
+	}
+	if !validateToken(token) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		http.Error(w, "invalid or revoked token \u2014 log in again to get a fresh one", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "text/x-shellscript")
+	script := fmt.Sprintf(`#!/bin/sh
+set -e
+echo "==> [NodePulse] Installing NodePulse Enterprise Agent..."
+SERVER_URL="https://pulse.nqai.es-cloud.ru"
+TOKEN="%s"
+NODE_ID="$(hostname)"
+
+mkdir -p /opt/nodepulse /etc/nodepulse
+curl -sSL -o /usr/local/bin/nodepulse-agent ${SERVER_URL}/bin/nodepulse-agent || true
+chmod +x /usr/local/bin/nodepulse-agent
+
+cat << UNIT > /etc/systemd/system/nodepulse-agent.service
+[Unit]
+Description=NodePulse Enterprise Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nodepulse-agent -node ${NODE_ID} -server ${SERVER_URL}/api/v1/ingest
+Environment=NODEPULSE_TOKEN=%s
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now nodepulse-agent.service
+echo "==> [NodePulse] Agent installed and registered successfully as ${NODE_ID}!"
+`, token, token)
+	w.Write([]byte(script))
 }
