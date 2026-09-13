@@ -159,22 +159,24 @@ func MergeProbeResults(httpResults, tcpResults []protocol.ProbeResult) []protoco
 	return out
 }
 
-// MergeProbeResultsAll concatenates HTTP, TCP, TLS, and DNS probe slices
-// while preserving each result's Kind tag. Order is HTTP first, then
-// TCP, then TLS, then DNS, so the public status page renders them in
-// the natural "synthetic, then external-dependency, then certificate
-// health, then resolver sanity" reading order.
+// MergeProbeResultsAll concatenates HTTP, TCP, TLS, DNS, and ICMP probe
+// slices while preserving each result's Kind tag. Order is HTTP first,
+// then TCP, then TLS, then DNS, then ICMP, so the public status page
+// renders them in the natural "synthetic, then external-dependency,
+// then certificate health, then resolver sanity, then layer-3
+// reachability" reading order.
 //
 // If all sides are empty the function is allocation-free.
-func MergeProbeResultsAll(httpResults, tcpResults, tlsResults, dnsResults []protocol.ProbeResult) []protocol.ProbeResult {
-	if len(httpResults) == 0 && len(tcpResults) == 0 && len(tlsResults) == 0 && len(dnsResults) == 0 {
+func MergeProbeResultsAll(httpResults, tcpResults, tlsResults, dnsResults, icmpResults []protocol.ProbeResult) []protocol.ProbeResult {
+	if len(httpResults) == 0 && len(tcpResults) == 0 && len(tlsResults) == 0 && len(dnsResults) == 0 && len(icmpResults) == 0 {
 		return nil
 	}
-	out := make([]protocol.ProbeResult, 0, len(httpResults)+len(tcpResults)+len(tlsResults)+len(dnsResults))
+	out := make([]protocol.ProbeResult, 0, len(httpResults)+len(tcpResults)+len(tlsResults)+len(dnsResults)+len(icmpResults))
 	out = append(out, httpResults...)
 	out = append(out, tcpResults...)
 	out = append(out, tlsResults...)
 	out = append(out, dnsResults...)
+	out = append(out, icmpResults...)
 	return out
 }
 
@@ -251,4 +253,67 @@ func isRecordType(s string) bool {
 	default:
 		return false
 	}
+}
+
+// ParseICMPTargets parses the operator-facing `-probe-icmp` flag value
+// into a normalized ICMPTarget slice. The accepted shapes are:
+//
+//   - "host"          — default 3 echo packets per probe
+//   - "host=N"        — send N echos per probe (N clamped to [1,10])
+//   - "host=N=1.2.3.4" — also pin the destination to a literal IPv4
+//                        (useful when DNS returns multiple A records
+//                        and the operator wants to probe a specific
+//                        one — e.g., the BGP-anycast IP)
+//
+// "=" is reserved because IPv6 literals may contain it; for the same
+// reason ParseICMPTargets does not accept a colon-separated form.
+// Empty entries are dropped, leading/trailing whitespace is trimmed.
+//
+// ponytail: same delimiter philosophy as the other Parse* helpers.
+// Promote to a JSON list the moment operators ask for richer config
+// (per-target label, source IP pinning, payload size).
+func ParseICMPTargets(raw string) ([]ICMPTarget, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]ICMPTarget, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		var (
+			addr, rest string
+			cut        bool
+		)
+		addr, rest, _ = strings.Cut(p, "=")
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			return nil, fmt.Errorf("icmp probe target %q: empty address", p)
+		}
+		// The count is everything before the *first* "=" that follows the
+		// address. "host=5" → count=5; "host=5=1.2.3.4" → count=5 (the
+		// second "=" is a future literal-IP knob, parsed but ignored
+		// until we wire IPv4 pinning through to ICMPRunner).
+		t := ICMPTarget{Address: addr}
+		countRaw := ""
+		if cut = rest != ""; cut {
+			countRaw, _, _ = strings.Cut(rest, "=")
+			countRaw = strings.TrimSpace(countRaw)
+		}
+		_ = cut
+		if countRaw != "" {
+			n, err := strconv.Atoi(countRaw)
+			if err != nil || n <= 0 {
+				return nil, fmt.Errorf("icmp probe target %q: bad count %q", p, countRaw)
+			}
+			t.Count = n
+		}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }

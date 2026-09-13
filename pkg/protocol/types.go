@@ -143,4 +143,12 @@ const (
 	// split-horizon DNS misconfigurations and stale resolver caches
 	// that a TCP probe alone would miss.
 	ProbeKindDNS = "dns"
+	// ProbeKindICMP sends ICMPv4 echo requests and reports RTT/loss.
+	// It is the only probe that exercises layer-3 reachability without
+	// TCP or UDP noise — useful for diagnosing firewall rules, MTU
+	// black holes, and BGP routing that a TCP connect would not see.
+	// Requires CAP_NET_RAW or net.ipv4.ping_group_range on Linux; the
+	// runner surfaces "permission_denied" on the ProbeResult.Error
+	// field when the kernel refuses the socket.
+	ProbeKindICMP = "icmp"
 )

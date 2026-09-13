@@ -32,6 +32,7 @@ func main() {
 	probeTCP := flag.String("probe-tcp", "", "Comma-separated TCP targets host:port[=banner] to probe on every heartbeat (e.g. db:5432=postgres,redis:6379)")
 	probeTLS := flag.String("probe-tls", "", "Comma-separated TLS handshake targets host:port[=Nd[:1.2|1.3[:insecure]]] to probe on every heartbeat (e.g. api.example.com:443=30d:1.3)")
 	probeDNS := flag.String("probe-dns", "", "Comma-separated DNS targets host[=substring|:TYPE[=substring]] to probe on every heartbeat (e.g. internal.svc=10.0.,api.example.com:AAAA=2001:db8)")
+	probeICMP := flag.String("probe-icmp", "", "Comma-separated ICMP echo targets host[=N] to probe on every heartbeat (e.g. 1.1.1.1=4,gateway=2). Requires CAP_NET_RAW or net.ipv4.ping_group_range on the host.")
 	probeTimeout := flag.Duration("probe-timeout", 5*time.Second, "Per-probe wall-clock timeout")
 	probeFollowRedirect := flag.Bool("probe-follow-redirect", false, "Follow HTTP 3xx redirects during probes (off by default)")
 	flag.Parse()
@@ -125,6 +126,20 @@ func main() {
 			len(dnsRunner.Targets()), *probeTimeout)
 	}
 
+	icmpRaw := *probeICMP
+	if icmpRaw == "" {
+		icmpRaw = os.Getenv("NODEPULSE_PROBE_ICMP")
+	}
+	icmpTargets, err := probe.ParseICMPTargets(icmpRaw)
+	if err != nil {
+		log.Fatalf("Invalid -probe-icmp value: %v", err)
+	}
+	icmpRunner := probe.NewICMPRunner(icmpTargets, *probeTimeout)
+	if len(icmpTargets) > 0 {
+		log.Printf("ICMP probes enabled: %d target(s), timeout=%s (needs CAP_NET_RAW or net.ipv4.ping_group_range)",
+			len(icmpRunner.Targets()), *probeTimeout)
+	}
+
 	var pendingMu sync.Mutex
 	pending := []protocol.AutoHealLog{}
 
@@ -180,8 +195,8 @@ func main() {
 		// block the system metrics snapshot, but before marshal so the
 		// results ride on the same payload. Failures are isolated per
 		// target and never abort the batch.
-		if len(probeTargets) > 0 || len(tcpTargets) > 0 || len(tlsTargets) > 0 || len(dnsTargets) > 0 {
-			var httpR, tcpR, tlsR, dnsR []protocol.ProbeResult
+		if len(probeTargets) > 0 || len(tcpTargets) > 0 || len(tlsTargets) > 0 || len(dnsTargets) > 0 || len(icmpTargets) > 0 {
+			var httpR, tcpR, tlsR, dnsR, icmpR []protocol.ProbeResult
 			if len(probeTargets) > 0 {
 				httpR = prober.Run()
 			}
@@ -194,7 +209,10 @@ func main() {
 			if len(dnsTargets) > 0 {
 				dnsR = dnsRunner.Run()
 			}
-			hb.Probes = probe.MergeProbeResultsAll(httpR, tcpR, tlsR, dnsR)
+			if len(icmpTargets) > 0 {
+				icmpR = icmpRunner.Run()
+			}
+			hb.Probes = probe.MergeProbeResultsAll(httpR, tcpR, tlsR, dnsR, icmpR)
 			for _, p := range hb.Probes {
 				if !p.OK {
 					log.Printf("Probe [%s] %s failed: status=%d err=%q",

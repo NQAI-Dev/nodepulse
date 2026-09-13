@@ -340,14 +340,15 @@ func TestMergeProbeResultsAll(t *testing.T) {
 	tcpR := []protocol.ProbeResult{{URL: "t", Kind: protocol.ProbeKindTCP}}
 	tlsR := []protocol.ProbeResult{{URL: "s", Kind: protocol.ProbeKindTLS}}
 	dnsR := []protocol.ProbeResult{{URL: "d", Kind: protocol.ProbeKindDNS}}
-	out := MergeProbeResultsAll(httpR, tcpR, tlsR, dnsR)
-	if len(out) != 4 {
-		t.Fatalf("len = %d, want 4", len(out))
+	icmpR := []protocol.ProbeResult{{URL: "i", Kind: protocol.ProbeKindICMP}}
+	out := MergeProbeResultsAll(httpR, tcpR, tlsR, dnsR, icmpR)
+	if len(out) != 5 {
+		t.Fatalf("len = %d, want 5", len(out))
 	}
-	if out[0].Kind != protocol.ProbeKindHTTP || out[1].Kind != protocol.ProbeKindTCP || out[2].Kind != protocol.ProbeKindTLS || out[3].Kind != protocol.ProbeKindDNS {
+	if out[0].Kind != protocol.ProbeKindHTTP || out[1].Kind != protocol.ProbeKindTCP || out[2].Kind != protocol.ProbeKindTLS || out[3].Kind != protocol.ProbeKindDNS || out[4].Kind != protocol.ProbeKindICMP {
 		t.Errorf("order broken: %+v", out)
 	}
-	if MergeProbeResultsAll(nil, nil, nil, nil) != nil {
+	if MergeProbeResultsAll(nil, nil, nil, nil, nil) != nil {
 		t.Errorf("all-empty should return nil")
 	}
 }
