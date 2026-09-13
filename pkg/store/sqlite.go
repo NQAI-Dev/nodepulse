@@ -118,6 +118,15 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 	);
 
+	CREATE TABLE IF NOT EXISTS telegram_users (
+		tg_id INTEGER PRIMARY KEY,
+		user_id INTEGER NOT NULL,
+		tg_username TEXT DEFAULT '',
+		tg_first_name TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+	);
+
 	CREATE TABLE IF NOT EXISTS incidents (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		node_id TEXT NOT NULL,
@@ -408,6 +417,41 @@ func (p *PersistentStore) Register(username, password string) (int64, string, er
 	token := fmt.Sprintf("np_%s_%x", username, sha256.Sum256([]byte(fmt.Sprintf("%d-%s", time.Now().UnixNano(), username))))[:36]
 	p.db.Exec("INSERT INTO api_tokens (token, user_id, name) VALUES (?, ?, 'default')", token, uid)
 
+	return uid, token, nil
+}
+
+// RegisterByTelegram creates or reuses a user bound to a Telegram user ID and
+// returns a fresh API token. Returns the existing user if the tg_id is
+// already linked, otherwise creates a fresh `tg_<id>` username with an
+// unusable random password (Telegram users only authenticate via this path).
+func (p *PersistentStore) RegisterByTelegram(tgID int64, firstName, username string) (int64, string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var uid int64
+	err := p.db.QueryRow("SELECT user_id FROM telegram_users WHERE tg_id = ?", tgID).Scan(&uid)
+	if err == nil {
+		// Existing TG user: just issue a new token.
+		token := fmt.Sprintf("np_tg_%x", sha256.Sum256([]byte(fmt.Sprintf("%d-%d", tgID, time.Now().UnixNano()))))[:36]
+		p.db.Exec("INSERT INTO api_tokens (token, user_id, name) VALUES (?, ?, 'tg-login')", token, uid)
+		return uid, token, nil
+	}
+
+	// New TG user: create backing user and link.
+	uname := fmt.Sprintf("tg_%d", tgID)
+	pwdHash := HashPassword(fmt.Sprintf("tg_%d_%d", tgID, time.Now().UnixNano()))
+	res, err := p.db.Exec("INSERT INTO users (username, password_hash) VALUES (?, ?)", uname, pwdHash)
+	if err != nil {
+		// Username collision: extremely unlikely with `tg_<tgID>`, but handle gracefully.
+		return 0, "", fmt.Errorf("username already exists")
+	}
+	uid, _ = res.LastInsertId()
+	p.db.Exec("INSERT INTO user_settings (user_id) VALUES (?)", uid)
+	p.db.Exec("INSERT INTO telegram_users (tg_id, user_id, tg_username, tg_first_name) VALUES (?, ?, ?, ?)",
+		tgID, uid, username, firstName)
+
+	token := fmt.Sprintf("np_tg_%x", sha256.Sum256([]byte(fmt.Sprintf("%d-%d", tgID, time.Now().UnixNano()))))[:36]
+	p.db.Exec("INSERT INTO api_tokens (token, user_id, name) VALUES (?, ?, 'tg-login')", token, uid)
 	return uid, token, nil
 }
 

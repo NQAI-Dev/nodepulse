@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -146,6 +151,79 @@ func main() {
 			},
 		})
 	}))
+
+	// Telegram Login Widget callback: GET /api/v1/tg-callback?id=...&first_name=...&...&hash=...
+	// Validates the HMAC-SHA256 signature using the bot token, then provisions
+	// (or reuses) a user keyed by tg_id and redirects to the dashboard with
+	// the new API token in the URL fragment (dashboard JS reads it into
+	// localStorage so the operator never has to copy/paste it).
+	mux.HandleFunc("GET /api/v1/tg-callback", func(w http.ResponseWriter, r *http.Request) {
+		if token == "" {
+			http.Error(w, `{"error":"tg-callback not configured: set NODEPULSE_TG_TOKEN or -tg-token"}`, http.StatusServiceUnavailable)
+			return
+		}
+		q := r.URL.Query()
+		hash := q.Get("hash")
+		if hash == "" {
+			http.Error(w, `{"error":"missing hash"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Build the canonical check string: all fields except `hash`, sorted
+		// alphabetically, joined with \n as `key=value` pairs.
+		q.Del("hash")
+		keys := make([]string, 0, len(q))
+		for k := range q {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var parts []string
+		for _, k := range keys {
+			parts = append(parts, k+"="+q.Get(k))
+		}
+		checkString := strings.Join(parts, "\n")
+
+		// Telegram spec: secret_key = sha256(bot_token), then HMAC-SHA256 the
+		// check string with that secret. Compare with the supplied hash in
+		// constant time so timing leaks can't help an attacker guess fields.
+		secretKey := sha256.Sum256([]byte(token))
+		mac := hmac.New(sha256.New, secretKey[:])
+		mac.Write([]byte(checkString))
+		computed := hex.EncodeToString(mac.Sum(nil))
+		if subtle.ConstantTimeCompare([]byte(computed), []byte(hash)) != 1 {
+			http.Error(w, `{"error":"invalid hash"}`, http.StatusUnauthorized)
+			return
+		}
+
+		// auth_date freshness check: 5 minutes. Telegram documents do not
+		// mandate this, but accepting week-old signatures would let a
+		// screenshot of the widget authorize forever.
+		authDateStr := q.Get("auth_date")
+		if authDate, err := strconv.ParseInt(authDateStr, 10, 64); err == nil {
+			if time.Now().Unix()-authDate > 300 {
+				http.Error(w, `{"error":"auth_date too old"}`, http.StatusUnauthorized)
+				return
+			}
+		}
+
+		tgID, err := strconv.ParseInt(q.Get("id"), 10, 64)
+		if err != nil || tgID == 0 {
+			http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
+			return
+		}
+		uid, tok, err := pStore.RegisterByTelegram(tgID, q.Get("first_name"), q.Get("username"))
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		log.Printf("[tg-callback] login ok tg_id=%d uid=%d", tgID, uid)
+
+		// Redirect to dashboard with token in URL fragment so the dashboard
+		// JS picks it up via `window.location.hash` and stashes it in
+		// localStorage without ever sending it to a third-party server log.
+		fragment := fmt.Sprintf("token=%s&user_id=%d&tg_id=%d", tok, uid, tgID)
+		http.Redirect(w, r, "/index.html#"+fragment, http.StatusFound)
+	})
 
 	// 2. Billing endpoints
 	mux.HandleFunc("POST /api/v1/billing/create-invoice", func(w http.ResponseWriter, r *http.Request) {
