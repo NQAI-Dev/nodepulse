@@ -7,19 +7,17 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
-	"strings"
 	"time"
 )
 
-// AutoHeal executes remediation actions returned by the control plane
+// AutoHeal executes remediation actions returned by the control plane.
+// Parsing delegates to ParseCommand so the dry-run PlanCommand path and
+// the live executor share one allow-list and one grammar.
 func ExecuteCommand(cmd string) error {
-	parts := strings.SplitN(cmd, ":", 2)
-	action := parts[0]
-	target := ""
-	if len(parts) > 1 {
-		target = parts[1]
+	action, target, err := ParseCommand(cmd)
+	if err != nil {
+		return err
 	}
-
 	switch action {
 	case "restart_docker":
 		return restartDockerContainer(target)
