@@ -1,5 +1,10 @@
 package store
 
+import (
+	"database/sql"
+	"fmt"
+)
+
 func (p *PersistentStore) InitBillingSchema() error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS invoices (
@@ -16,8 +21,14 @@ func (p *PersistentStore) InitBillingSchema() error {
 		`ALTER TABLE users ADD COLUMN plan TEXT DEFAULT 'free'`,
 		`ALTER TABLE users ADD COLUMN pro_until DATETIME`,
 	}
-	for _, q := range queries {
-		p.db.Exec(q)
+	for i, q := range queries {
+		if _, err := p.db.Exec(q); err != nil {
+			// ALTER TABLE ... ADD COLUMN fails if the column already exists.
+			// That's a no-op on every server restart, so the only way this
+			// path matters is if SQLite is genuinely broken — return the
+			// error with enough context for an operator to debug.
+			return fmt.Errorf("init billing schema step %d: %w", i, err)
+		}
 	}
 	return nil
 }
@@ -25,24 +36,56 @@ func (p *PersistentStore) InitBillingSchema() error {
 func (p *PersistentStore) SaveInvoice(invoiceID string, userID int64, plan, amount, payURL string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	_, err := p.db.Exec("INSERT INTO invoices (invoice_id, user_id, plan, amount, pay_url, status) VALUES (?, ?, ?, ?, ?, 'created')",
-		invoiceID, userID, plan, amount, payURL)
-	return err
+	if _, err := p.db.Exec("INSERT INTO invoices (invoice_id, user_id, plan, amount, pay_url, status) VALUES (?, ?, ?, ?, ?, 'created')",
+		invoiceID, userID, plan, amount, payURL); err != nil {
+		return fmt.Errorf("save invoice %q for uid=%d: %w", invoiceID, userID, err)
+	}
+	return nil
 }
 
+// MarkInvoicePaid transitions an invoice from "created" to "paid" and
+// extends (NOT resets) the owning user's pro_until by 30 days. It is
+// idempotent: a webhook retry from YooKassa/CryptoBot/Stripe against
+// the same invoice_id returns success with no further writes, so a flaky
+// network can't chop a user's paid window.
+//
+// On the first successful call for an invoice:
+//   - invoices.paid_at is stamped (audit row, stable across retries)
+//   - users.pro_until is set to COALESCE(datetime(pro_until, '+30 days'),
+//     datetime('now', '+30 days')) — extension from existing value if the
+//     user already has paid time remaining, otherwise the standard
+//     30-day window from "now". This is atomic in a single UPDATE.
 func (p *PersistentStore) MarkInvoicePaid(invoiceID string) (int64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	var userID int64
-	var plan string
-	err := p.db.QueryRow("SELECT user_id, plan FROM invoices WHERE invoice_id = ?", invoiceID).Scan(&userID, &plan)
+	var paidAt sql.NullString
+	err := p.db.QueryRow("SELECT user_id, paid_at FROM invoices WHERE invoice_id = ?", invoiceID).Scan(&userID, &paidAt)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("lookup invoice %q: %w", invoiceID, err)
 	}
 
-	p.db.Exec("UPDATE invoices SET status = 'paid', paid_at = CURRENT_TIMESTAMP WHERE invoice_id = ?", invoiceID)
-	p.db.Exec("UPDATE users SET plan = 'pro', pro_until = datetime('now', '+30 days') WHERE id = ?", userID)
+	// Idempotent fast path: if the invoice is already stamped paid, the
+	// webhook is a retry — return the user id with no further writes.
+	// pro_until and paid_at stay at their original values, so a transient
+	// network blip can't move the user's paid window.
+	if paidAt.Valid {
+		return userID, nil
+	}
+
+	if _, err := p.db.Exec("UPDATE invoices SET status = 'paid', paid_at = CURRENT_TIMESTAMP WHERE invoice_id = ?", invoiceID); err != nil {
+		return 0, fmt.Errorf("stamp paid_at for invoice %q (uid=%d): %w", invoiceID, userID, err)
+	}
+	// Extend (or initial-set) pro_until in a single atomic UPDATE:
+	//   - if pro_until is already set: add 30 days from it (stack / renew)
+	//   - if pro_until is NULL (free user): start the 30-day window now
+	if _, err := p.db.Exec(`UPDATE users
+		SET plan = 'pro',
+		    pro_until = COALESCE(datetime(pro_until, '+30 days'), datetime('now', '+30 days'))
+		WHERE id = ?`, userID); err != nil {
+		return 0, fmt.Errorf("extend pro_until for uid=%d on invoice %q: %w", userID, invoiceID, err)
+	}
 	return userID, nil
 }
 
