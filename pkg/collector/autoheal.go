@@ -113,9 +113,12 @@ func restartDockerContainer(nameOrID string) error {
 	// grace window becomes ErrPostRestartDown so the breaker can open
 	// fast.
 	inspectClient := &http.Client{Transport: dialer, Timeout: dockerInspectTimeout}
-	healthyTicks := 0
+	// The grace window must span the full dockerPostRestartGrace duration:
+	// a container that crashes at second 4 (e.g. happy_khorana) must NOT be
+	// declared healthy before the window elapses. We only return nil once
+	// the deadline has passed without observing a negative signal.
 	deadline := time.Now().Add(dockerPostRestartGrace)
-	var lastBody []byte
+	var lastInfo *dockerStateSnapshot
 	for time.Now().Before(deadline) {
 		inspReq, err := http.NewRequest("GET", fmt.Sprintf("http://localhost/containers/%s/json", nameOrID), nil)
 		if err != nil {
@@ -136,30 +139,19 @@ func restartDockerContainer(nameOrID string) error {
 			time.Sleep(dockerPostRestartPoll)
 			continue
 		}
-		lastBody = body
-		var info struct {
-			State struct {
-				Status     string `json:"Status"`
-				Running    bool   `json:"Running"`
-				Restarting bool   `json:"Restarting"`
-				ExitCode   int    `json:"ExitCode"`
-				Error      string `json:"Error"`
-				FinishedAt string `json:"FinishedAt"`
-			} `json:"State"`
-		}
+		var info dockerStateSnapshot
 		if err := json.Unmarshal(body, &info); err != nil {
 			time.Sleep(dockerPostRestartPoll)
 			continue
 		}
+		lastInfo = &info
 		if info.State.Restarting {
 			// Docker's own restart policy is in charge; let it run.
 			return nil
 		}
 		if info.State.Running {
-			healthyTicks++
-			if healthyTicks >= 2 {
-				return nil
-			}
+			// Keep polling until the grace window elapses; a crash at
+			// second 4 must still trip the breaker.
 			time.Sleep(dockerPostRestartPoll)
 			continue
 		}
@@ -171,25 +163,37 @@ func restartDockerContainer(nameOrID string) error {
 		return fmt.Errorf("%w: container=%s state=%s exit_code=%d err=%q finished_at=%s",
 			ErrPostRestartDown, nameOrID, state, info.State.ExitCode, info.State.Error, info.State.FinishedAt)
 	}
-	// Grace elapsed with no negative signal but no two consecutive healthy
-	// ticks either. Best-effort: treat as healthy. Inspect failures
-	// throughout the poll (network blip, Docker API hiccup) must never
-	// mask a successful restart.
-	if len(lastBody) > 0 {
-		var info struct {
-			State struct {
-				Status     string `json:"Status"`
-				Running    bool   `json:"Running"`
-				Restarting bool   `json:"Restarting"`
-			} `json:"State"`
-		}
-		if err := json.Unmarshal(lastBody, &info); err == nil {
-			if info.State.Running {
-				return nil
-			}
-		}
+	// Grace window elapsed. Declare healthy only if the last sample we
+	// managed to read was actually running. Inspect failures throughout
+	// the poll (network blip, Docker API hiccup) are tolerated — the
+	// restart itself already returned 204 — but an explicit non-running
+	// sample must propagate.
+	if lastInfo != nil && lastInfo.State.Running {
+		return nil
 	}
-	return nil
+	if lastInfo == nil {
+		return nil
+	}
+	state := strings.TrimSpace(lastInfo.State.Status)
+	if state == "" {
+		state = "exited"
+	}
+	return fmt.Errorf("%w: container=%s state=%s exit_code=%d err=%q finished_at=%s",
+		ErrPostRestartDown, nameOrID, state, lastInfo.State.ExitCode, lastInfo.State.Error, lastInfo.State.FinishedAt)
+}
+
+// dockerStateSnapshot mirrors the subset of /containers/{id}/json we read
+// during the post-restart live check. Kept private so changes to the wire
+// shape stay local to this file.
+type dockerStateSnapshot struct {
+	State struct {
+		Status     string `json:"Status"`
+		Running    bool   `json:"Running"`
+		Restarting bool   `json:"Restarting"`
+		ExitCode   int    `json:"ExitCode"`
+		Error      string `json:"Error"`
+		FinishedAt string `json:"FinishedAt"`
+	} `json:"State"`
 }
 
 func restartSystemdService(service string) error {
