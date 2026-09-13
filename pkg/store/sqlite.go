@@ -183,10 +183,16 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 		error TEXT DEFAULT '',
 		latency_ms INTEGER NOT NULL DEFAULT 0,
 		total_latency_ms INTEGER NOT NULL DEFAULT 0,
-		ts INTEGER NOT NULL
+		ts INTEGER NOT NULL,
+		payload TEXT DEFAULT ''
 	)`)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_whdel_user_ts ON webhook_deliveries(user_id, ts)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_whdel_ts ON webhook_deliveries(ts)")
+
+	// payload: JSON-serialized WebhookAlert captured at dispatch time so an
+	// operator can manually retry a failed delivery verbatim, even after the
+	// original incident is resolved or the webhook URL/secret has rotated.
+	_, _ = db.Exec("ALTER TABLE webhook_deliveries ADD COLUMN payload TEXT DEFAULT ''")
 
 	// Node tags: persisted copy of the agent-reported labels. Stored as a
 	// newline-separated list (one tag per line) so the LIKE-based filter

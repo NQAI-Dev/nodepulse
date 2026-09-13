@@ -25,4 +25,9 @@ type WebhookDelivery struct {
 	LatencyMs     int64  `json:"latency_ms"`    // wall time spent on the successful (or final) attempt
 	TotalLatencyMs int64 `json:"total_latency_ms"` // dispatch() start→finish, includes sleeps
 	Timestamp     int64  `json:"timestamp"`
+	// Payload is the JSON-serialized WebhookAlert that was dispatched.
+	// Captured here so an operator can manually retry the exact same
+	// payload even after the original incident is resolved, the webhook
+	// URL rotated, or the secret changed.
+	Payload       string `json:"payload,omitempty"`
 }

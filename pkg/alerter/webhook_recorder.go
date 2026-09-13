@@ -1,6 +1,7 @@
 package alerter
 
 import (
+	"encoding/json"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -149,6 +150,15 @@ func (r *WebhookRecorder) dispatchWithMetadata(userID, incidentID int64, url, se
 	startedAt := time.Now()
 	err := r.inner.DispatchSigned(url, secret, event)
 
+	// Snapshot the JSON payload alongside the audit row so a manual retry
+	// can replay the exact bytes even after the incident is gone or the
+	// webhook secret has been rotated. Failure to marshal is non-fatal —
+	// we just skip the snapshot and the retry endpoint will 400.
+	var payloadJSON string
+	if raw, mErr := json.Marshal(event); mErr == nil {
+		payloadJSON = string(raw)
+	}
+
 	rec := protocol.WebhookDelivery{
 		UserID:         userID,
 		IncidentID:     strconv.FormatInt(incidentID, 10),
@@ -157,6 +167,7 @@ func (r *WebhookRecorder) dispatchWithMetadata(userID, incidentID int64, url, se
 		Attempts:       r.inner.maxRetries + 1,
 		Timestamp:      startedAt.Unix(),
 		TotalLatencyMs: time.Since(startedAt).Milliseconds(),
+		Payload:        payloadJSON,
 	}
 	if err == nil {
 		rec.OK = true

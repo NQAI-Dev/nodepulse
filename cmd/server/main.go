@@ -1112,6 +1112,41 @@ func main() {
 		json.NewEncoder(w).Encode(stats)
 	})
 
+	// 8b. Manual retry of a previously-failed webhook delivery. Looks up the
+	// stored payload (snapshot of the original WebhookAlert) and re-dispatches
+	// it to the recorded URL with the user's *current* webhook secret for
+	// signing. Writes a fresh audit row so the retry outcome is visible next
+	// to the original failure.
+	mux.HandleFunc("POST /api/v1/webhook/deliveries/{id}/retry", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		idStr := r.PathValue("id")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil || id <= 0 {
+			http.Error(w, `{"error":"invalid delivery id"}`, http.StatusBadRequest)
+			return
+		}
+		newRow, err := pStore.RetryWebhookDelivery(uid, id)
+		if err != nil {
+			switch {
+			case errors.Is(err, store.ErrWebhookDeliveryNotFound):
+				http.Error(w, `{"error":"delivery not found"}`, http.StatusNotFound)
+			case errors.Is(err, store.ErrWebhookDeliveryNoPayload):
+				http.Error(w, `{"error":"delivery has no captured payload — cannot retry"}`, http.StatusUnprocessableEntity)
+			case errors.Is(err, store.ErrWebhookDeliveryBadPayload):
+				http.Error(w, `{"error":"delivery payload is unreadable"}`, http.StatusUnprocessableEntity)
+			default:
+				http.Error(w, `{"error":"retry failed"}`, http.StatusInternalServerError)
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(newRow)
+	})
+
 	// 6. Dynamic 1-line installation script generator
 	mux.HandleFunc("GET /install.sh", func(w http.ResponseWriter, r *http.Request) {
 		token := r.URL.Query().Get("token")

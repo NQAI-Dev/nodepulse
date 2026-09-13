@@ -25,8 +25,8 @@ func (p *PersistentStore) FlushWebhookDeliveries(items []protocol.WebhookDeliver
 		return 0, err
 	}
 	stmt, err := tx.Prepare(`INSERT INTO webhook_deliveries
-		(user_id, incident_id, event, url, attempts, status, ok, error, latency_ms, total_latency_ms, ts)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		(user_id, incident_id, event, url, attempts, status, ok, error, latency_ms, total_latency_ms, ts, payload)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return 0, err
@@ -50,6 +50,7 @@ func (p *PersistentStore) FlushWebhookDeliveries(items []protocol.WebhookDeliver
 			d.LatencyMs,
 			d.TotalLatencyMs,
 			d.Timestamp,
+			d.Payload,
 		); err != nil {
 			_ = stmt.Close()
 			_ = tx.Rollback()
@@ -77,7 +78,7 @@ func (p *PersistentStore) WebhookDeliveries(userID int64, limit int) ([]protocol
 		limit = 500
 	}
 	rows, err := p.db.Query(`SELECT id, user_id, incident_id, event, url, attempts,
-		status, ok, COALESCE(error, ''), latency_ms, total_latency_ms, ts
+		status, ok, COALESCE(error, ''), latency_ms, total_latency_ms, ts, COALESCE(payload, '')
 		FROM webhook_deliveries WHERE user_id = ?
 		ORDER BY id DESC LIMIT ?`, userID, limit)
 	if err != nil {
@@ -85,6 +86,27 @@ func (p *PersistentStore) WebhookDeliveries(userID int64, limit int) ([]protocol
 	}
 	defer rows.Close()
 	return scanWebhookDeliveries(rows)
+}
+
+// WebhookDeliveryByID returns a single delivery scoped to userID. Returns
+// (nil, nil) if no row matches — callers map that to 404 so the operator UI
+// can distinguish "missing" from "belongs to someone else".
+func (p *PersistentStore) WebhookDeliveryByID(userID, id int64) (*protocol.WebhookDelivery, error) {
+	rows, err := p.db.Query(`SELECT id, user_id, incident_id, event, url, attempts,
+		status, ok, COALESCE(error, ''), latency_ms, total_latency_ms, ts, COALESCE(payload, '')
+		FROM webhook_deliveries WHERE id = ? AND user_id = ?`, id, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items, err := scanWebhookDeliveries(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	return &items[0], nil
 }
 
 // WebhookDeliveryStats returns aggregate counts over the last `seconds`
@@ -125,7 +147,7 @@ func scanWebhookDeliveries(rows *sql.Rows) ([]protocol.WebhookDelivery, error) {
 		var ok int
 		if err := rows.Scan(
 			&d.ID, &d.UserID, &d.IncidentID, &d.Event, &d.URL, &d.Attempts,
-			&d.Status, &ok, &d.Error, &d.LatencyMs, &d.TotalLatencyMs, &d.Timestamp,
+			&d.Status, &ok, &d.Error, &d.LatencyMs, &d.TotalLatencyMs, &d.Timestamp, &d.Payload,
 		); err != nil {
 			return nil, err
 		}
