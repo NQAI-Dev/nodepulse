@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
+    <meta charset="utf-8">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NodePulse — облачный мониторинг серверов и контейнеров</title>
@@ -309,7 +310,7 @@
             <h1>Мониторинг серверов,<br>который видит <span class="gradient">реальные проблемы</span></h1>
             <p>Agent-based платформа: ловит падения контейнеров, деградацию дисков, просроченные TLS-сертификаты — за секунды, а не через 5 минут uptime-проверки.</p>
             <div class="hero-cta">
-                <a href="#signup" class="btn btn-telegram btn-lg">⚡ Подключить через Telegram</a>
+                <a href="https://t.me/nodepulse_mon_bot?start=login" target="_blank" rel="noopener" class="btn btn-telegram btn-lg">⚡ Подключить через Telegram</a>
                 <a href="https://github.com/NQAI-Dev/nodepulse" target="_blank" class="btn btn-lg">📦 GitHub</a>
             </div>
             <div class="hero-trust">
@@ -438,9 +439,11 @@
         <div class="container">
             <div class="signup-card">
                 <h2>Подключиться за 30 секунд</h2>
-                <p>Авторизуйся через Telegram — получишь API-ключ и команду установки агента. Никаких паролей.</p>
-                <div class="signup-tg" id="tg-widget"></div>
-                <div class="signup-note">Telegram бот <strong>@nodepulse_mon_bot</strong> сохранит твой chat ID для алертов.</div>
+                <p>Жми кнопку — откроется Telegram с ботом. Бот пришлёт ссылку для входа, без пароля.</p>
+                <a href="https://t.me/nodepulse_mon_bot?start=login" target="_blank" rel="noopener" class="btn" style="background: var(--telegram, #2aabee); border-color: var(--telegram, #2aabee); color: #fff; font-size: 1.05rem; padding: 0.9rem 1.4rem; display: inline-block; width: 100%; text-align: center;">
+                    ⚡ Войти через Telegram
+                </a>
+                <div class="signup-note">Бот <strong>@nodepulse_mon_bot</strong> создаст аккаунт и пришлёт ссылку для входа. Без пароля.</div>
             </div>
         </div>
     </section>
@@ -457,18 +460,13 @@
     </footer>
 
     <script>
-        // Render Telegram Login Widget into placeholder (button stays clickable).
-        (function() {
-            const placeholder = document.getElementById('tg-widget');
-            const script = document.createElement('script');
-            script.async = true;
-            script.src = 'https://telegram.org/js/telegram-widget.js?22';
-            script.setAttribute('data-telegram-login', 'nodepulse_mon_bot');
-            script.setAttribute('data-size', 'large');
-            script.setAttribute('data-auth-url', '/api/v1/tg-callback');
-            script.setAttribute('data-request-access', 'write');
-            placeholder.appendChild(script);
-        })();
+        // Telegram Login Widget intentionally removed: it requires @BotFather
+        // /setdomain on @nodepulse_mon_bot for pulse.nqai.es-cloud.ru, which
+        // throws "Bot domain invalid" in the browser console until the bot
+        // owner wires it up. The deep-link flow (t.me/<bot>?start=login)
+        // is the supported login path and works without /setdomain — see
+        // nodepulse-bot commit 8f1cd17 (handler) and nodepulse commit
+        // 6716c65 (server-side HMAC verifier reused as the callback target).
     </script>
 </body>
 </html>
