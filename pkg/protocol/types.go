@@ -132,4 +132,10 @@ type ProbeResult struct {
 const (
 	ProbeKindHTTP = "http"
 	ProbeKindTCP  = "tcp"
+	// ProbeKindTLS checks a TLS endpoint by dialing, completing the
+	// handshake, and reporting the leaf certificate's expiry window.
+	// The control plane renders it as a "certificate health" widget
+	// and raises an incident when the cert enters the operator's
+	// configured warn window.
+	ProbeKindTLS = "tls"
 )

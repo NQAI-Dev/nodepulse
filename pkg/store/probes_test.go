@@ -167,19 +167,26 @@ func TestProbeKindIsPersistedAndFilterable(t *testing.T) {
 		{URL: "db:5432", Kind: protocol.ProbeKindTCP, LatencyMs: 12, OK: true, Ts: now - 20},
 		{URL: "cache:6379", Kind: protocol.ProbeKindTCP, LatencyMs: 5, OK: false, Error: "connection_refused", Ts: now - 10},
 	}
+	tlsR := []protocol.ProbeResult{
+		{URL: "api.example:443", Kind: protocol.ProbeKindTLS, LatencyMs: 80, OK: true, Ts: now - 5},
+		{URL: "expired.example:443", Kind: protocol.ProbeKindTLS, LatencyMs: 70, OK: false, Error: "cert_expired", Ts: now - 4},
+	}
 	if err := store.RecordProbeResults("node-1", httpR); err != nil {
 		t.Fatalf("http record: %v", err)
 	}
 	if err := store.RecordProbeResults("node-1", tcpR); err != nil {
 		t.Fatalf("tcp record: %v", err)
 	}
+	if err := store.RecordProbeResults("node-1", tlsR); err != nil {
+		t.Fatalf("tls record: %v", err)
+	}
 
 	all, err := store.ProbeSummaries(3600)
 	if err != nil {
 		t.Fatalf("ProbeSummaries: %v", err)
 	}
-	if len(all) != 3 {
-		t.Fatalf("all summaries len = %d, want 3", len(all))
+	if len(all) != 5 {
+		t.Fatalf("all summaries len = %d, want 5", len(all))
 	}
 	byURL := map[string]ProbeSummary{}
 	for _, s := range all {
@@ -190,6 +197,18 @@ func TestProbeKindIsPersistedAndFilterable(t *testing.T) {
 	}
 	if byURL["db:5432"].Kind != protocol.ProbeKindTCP {
 		t.Errorf("tcp kind = %q, want %q", byURL["db:5432"].Kind, protocol.ProbeKindTCP)
+	}
+	if byURL["api.example:443"].Kind != protocol.ProbeKindTLS {
+		t.Errorf("tls kind = %q, want %q", byURL["api.example:443"].Kind, protocol.ProbeKindTLS)
+	}
+	if byURL["expired.example:443"].Failed == 0 || byURL["expired.example:443"].OK != 0 {
+		t.Errorf("expired tls summary OK=%d Failed=%d, want Failed>0 and OK==0", byURL["expired.example:443"].OK, byURL["expired.example:443"].Failed)
+	}
+	if byURL["api.example:443"].Kind != protocol.ProbeKindTLS {
+		t.Errorf("tls kind = %q, want %q", byURL["api.example:443"].Kind, protocol.ProbeKindTLS)
+	}
+	if byURL["expired.example:443"].Failed == 0 || byURL["expired.example:443"].OK != 0 {
+		t.Errorf("expired tls summary OK=%d Failed=%d, want Failed>0 and OK==0", byURL["expired.example:443"].OK, byURL["expired.example:443"].Failed)
 	}
 
 	tcpOnly, err := store.ProbeSummariesByKind(3600, protocol.ProbeKindTCP)

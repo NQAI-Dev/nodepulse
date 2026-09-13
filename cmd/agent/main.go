@@ -30,6 +30,7 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "Collect and print without network push")
 	probeURLs := flag.String("probe-urls", "", "Comma-separated HTTP URLs to probe on every heartbeat (e.g. https://api.example.com/health)")
 	probeTCP := flag.String("probe-tcp", "", "Comma-separated TCP targets host:port[=banner] to probe on every heartbeat (e.g. db:5432=postgres,redis:6379)")
+	probeTLS := flag.String("probe-tls", "", "Comma-separated TLS handshake targets host:port[=Nd[:1.2|1.3[:insecure]]] to probe on every heartbeat (e.g. api.example.com:443=30d:1.3)")
 	probeTimeout := flag.Duration("probe-timeout", 5*time.Second, "Per-probe wall-clock timeout")
 	probeFollowRedirect := flag.Bool("probe-follow-redirect", false, "Follow HTTP 3xx redirects during probes (off by default)")
 	flag.Parse()
@@ -95,6 +96,20 @@ func main() {
 			len(tcpRunner.Targets()), *probeTimeout)
 	}
 
+	tlsRaw := *probeTLS
+	if tlsRaw == "" {
+		tlsRaw = os.Getenv("NODEPULSE_PROBE_TLS")
+	}
+	tlsTargets, err := probe.ParseTLSTargets(tlsRaw)
+	if err != nil {
+		log.Fatalf("Invalid -probe-tls value: %v", err)
+	}
+	tlsRunner := probe.NewTLSRunner(tlsTargets, *probeTimeout)
+	if len(tlsTargets) > 0 {
+		log.Printf("TLS probes enabled: %d target(s), timeout=%s",
+			len(tlsRunner.Targets()), *probeTimeout)
+	}
+
 	var pendingMu sync.Mutex
 	pending := []protocol.AutoHealLog{}
 
@@ -150,15 +165,18 @@ func main() {
 		// block the system metrics snapshot, but before marshal so the
 		// results ride on the same payload. Failures are isolated per
 		// target and never abort the batch.
-		if len(probeTargets) > 0 || len(tcpTargets) > 0 {
-			var httpR, tcpR []protocol.ProbeResult
+		if len(probeTargets) > 0 || len(tcpTargets) > 0 || len(tlsTargets) > 0 {
+			var httpR, tcpR, tlsR []protocol.ProbeResult
 			if len(probeTargets) > 0 {
 				httpR = prober.Run()
 			}
 			if len(tcpTargets) > 0 {
 				tcpR = tcpRunner.Run()
 			}
-			hb.Probes = probe.MergeProbeResults(httpR, tcpR)
+			if len(tlsTargets) > 0 {
+				tlsR = tlsRunner.Run()
+			}
+			hb.Probes = probe.MergeProbeResultsAll(httpR, tcpR, tlsR)
 			for _, p := range hb.Probes {
 				if !p.OK {
 					log.Printf("Probe [%s] %s failed: status=%d err=%q",
