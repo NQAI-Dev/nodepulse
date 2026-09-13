@@ -3,3 +3,8 @@ bin/
 *.db
 *.log
 .env
+
+# Untracked build outputs from `go build ./cmd/<name>` (default = dir name)
+# Keep `bin/` for intentional builds, but don't let bare `go build` pollute root.
+/server
+/agent
