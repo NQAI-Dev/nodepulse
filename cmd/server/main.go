@@ -1253,6 +1253,32 @@ func main() {
 		json.NewEncoder(w).Encode(newRow)
 	})
 
+	// Operator-only retention knob: purge a single webhook audit row. The
+	// store scopes the delete by (id, user_id), so a token from one tenant
+	// cannot wipe another tenant's log. Idempotent: deleting an unknown id
+	// returns 200 with `deleted: false` so the UI doesn't have to special-
+	// case "already gone" on a refresh.
+	mux.HandleFunc("DELETE /api/v1/webhook/deliveries/{id}", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		idStr := r.PathValue("id")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil || id <= 0 {
+			http.Error(w, `{"error":"invalid delivery id"}`, http.StatusBadRequest)
+			return
+		}
+		deleted, err := pStore.DeleteWebhookDelivery(uid, id)
+		if err != nil {
+			http.Error(w, `{"error":"delete failed"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"deleted":%t}`+"\n", deleted)
+	})
+
 	// 6. Dynamic 1-line installation script generator
 	mux.HandleFunc("GET /install.sh", func(w http.ResponseWriter, r *http.Request) {
 		token := r.URL.Query().Get("token")
