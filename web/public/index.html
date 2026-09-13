@@ -180,6 +180,7 @@
         <div class="pricing-info">
             <div class="pricing-title">Тарифный план: <span id="current-plan-name" class="plan-badge plan-free">FREE</span></div>
             <div class="pricing-desc" id="plan-desc">Бесплатный тариф: до 3 нод. Обновитесь до PRO для неограниченного флота и мгновенных алертов.</div>
+            <div class="pricing-usage" id="plan-usage" style="font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-dim); display: none;"></div>
         </div>
         <button class="btn btn-pro" id="upgrade-btn" onclick="buyPro()">Активировать PRO ($5 / мес)</button>
     </div>
@@ -274,6 +275,7 @@
     <script>
         let currentAuth = JSON.parse(localStorage.getItem('np_auth') || 'null');
         let currentPlan = 'free';
+        let currentPlanUsage = null;
         let isRegisterMode = false;
 
         async function loadPlan() {
@@ -288,6 +290,7 @@
                 if (res.ok) {
                     const data = await res.json();
                     currentPlan = data.plan;
+                    currentPlanUsage = data;
                     renderPlanUI();
                 }
             } catch (e) {
@@ -300,8 +303,14 @@
             const badge = document.getElementById('current-plan-name');
             const desc = document.getElementById('plan-desc');
             const btn = document.getElementById('upgrade-btn');
+            const usage = document.getElementById('plan-usage');
 
             banner.style.display = 'flex';
+            const fmtLimit = (n) => n === -1 ? '∞' : String(n);
+            const nodes = currentPlanUsage ? `${currentPlanUsage.nodes_used} / ${fmtLimit(currentPlanUsage.nodes_limit)}` : '';
+            const probes = currentPlanUsage ? `${currentPlanUsage.probes_used} / ${fmtLimit(currentPlanUsage.probes_limit)}` : '';
+            const retention = currentPlanUsage ? currentPlanUsage.retention_days : '';
+
             if (currentPlan === 'pro') {
                 badge.className = 'plan-badge plan-pro-badge';
                 badge.innerText = 'PRO';
@@ -312,6 +321,13 @@
                 badge.innerText = 'FREE';
                 desc.innerText = 'Бесплатный тариф: до 3 нод. Обновитесь до PRO для расширения лимита.';
                 btn.style.display = 'block';
+            }
+
+            if (currentPlanUsage) {
+                usage.style.display = 'block';
+                usage.innerText = `ноды: ${nodes}  •  пробники: ${probes}  •  хранение: ${retention} дн.`;
+            } else {
+                usage.style.display = 'none';
             }
         }
 
