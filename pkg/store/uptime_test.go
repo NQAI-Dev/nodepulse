@@ -15,6 +15,12 @@ func TestUptimeRollupCreditsDelta(t *testing.T) {
 	}
 
 	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	if now.UTC().Format("2006-01-02") != time.Now().UTC().Format("2006-01-02") {
+		// Pin the seed inside the NodeUptime query window (today UTC).
+		// The hardcoded date drifts the moment the calendar flips — bump
+		// it forward so the cutoff filter keeps the rollup row visible.
+		now = time.Now().UTC().Truncate(24 * time.Hour).Add(12 * time.Hour)
+	}
 	if _, err := st.RecordHeartbeat("node-a", now); err != nil {
 		t.Fatalf("first heartbeat: %v", err)
 	}
@@ -210,6 +216,12 @@ func TestFleetUptimeDailyAggregatesAcrossNodes(t *testing.T) {
 	}
 
 	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	if now.UTC().Format("2006-01-02") != time.Now().UTC().Format("2006-01-02") {
+		// Same drift fix as TestUptimeRollupCreditsDelta: keep the seed
+		// inside the fleet rollup window so the test stays valid past the
+		// UTC calendar flip.
+		now = time.Now().UTC().Truncate(24 * time.Hour).Add(12 * time.Hour)
+	}
 	for _, id := range []string{"alpha", "beta"} {
 		st.RecordHeartbeat(id, now)
 		st.RecordHeartbeat(id, now.Add(time.Second)) // 1s credit each
