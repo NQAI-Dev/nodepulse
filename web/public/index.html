@@ -240,8 +240,10 @@
                     Уведомлять о предупреждениях (CPU > 80%, Mem > 85%)
                 </label>
             </div>
+            <div id="cfg-test-result" style="display:none; margin-bottom: 12px; font-size: 0.8rem;"></div>
             <div class="modal-actions">
                 <button class="btn" onclick="closeSettingsModal()">Отмена</button>
+                <button class="btn" onclick="testSettings()">🧪 Тест</button>
                 <button class="btn btn-primary" onclick="saveSettings()">Сохранить</button>
             </div>
         </div>
@@ -355,6 +357,42 @@
 
         function closeSettingsModal() {
             document.getElementById('settings-modal').style.display = 'none';
+        }
+
+        async function testSettings() {
+            if (!currentAuth) return;
+            const tgChat = document.getElementById('cfg-tg-chat').value.trim();
+            const webhook = document.getElementById('cfg-webhook').value.trim();
+            const resultEl = document.getElementById('cfg-test-result');
+            resultEl.style.display = 'block';
+            resultEl.innerHTML = '<span style="color:var(--text-dim);">⏳ Отправляю тестовые уведомления...</span>';
+            try {
+                const res = await fetch('/api/v1/settings/test', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + currentAuth.token
+                    },
+                    body: JSON.stringify({
+                        channel: 'all',
+                        chat_id: tgChat,
+                        webhook_url: webhook
+                    })
+                });
+                const data = await res.json().catch(() => ({results: []}));
+                const lines = (data.results || []).map(r => {
+                    const icon = r.ok ? '✅' : '❌';
+                    const err = r.error ? `: ${escapeHtml(r.error)}` : '';
+                    const label = r.channel === 'telegram' ? 'Telegram' : 'Webhook';
+                    return `<div style="margin-top:4px;">${icon} <b>${label}</b>${err}</div>`;
+                });
+                const headline = res.ok
+                    ? '<span style="color:var(--green);">✓ Доставлено</span>'
+                    : '<span style="color:var(--red);">✗ Не удалось доставить</span>';
+                resultEl.innerHTML = headline + lines.join('');
+            } catch (e) {
+                resultEl.innerHTML = '<span style="color:var(--red);">Ошибка сети: ' + escapeHtml(String(e)) + '</span>';
+            }
         }
 
         async function saveSettings() {
