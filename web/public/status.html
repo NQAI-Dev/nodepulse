@@ -177,6 +177,15 @@
             </div>
         </div>
 
+        <div id="maintenance-card" class="card" style="display: none;">
+            <div class="card-title">
+                <span>🔧 Запланированные технические работы</span>
+                <span id="maintenance-count" style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--accent-yellow);">--</span>
+            </div>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 12px;">Активные и предстоящие окна регламентного обслуживания инфраструктуры.</p>
+            <div id="maintenance-list"></div>
+        </div>
+
         <div class="card">
             <div class="card-title">Текущие инциденты</div>
             <div id="incidents-list">
@@ -296,6 +305,40 @@
                     }
                 } catch (e) {
                     console.error('probes fetch failed', e);
+                }
+
+                const mCard = document.getElementById('maintenance-card');
+                const mList = document.getElementById('maintenance-list');
+                const mCount = document.getElementById('maintenance-count');
+                try {
+                    const mRes = await fetch('/api/v1/public/maintenance');
+                    if (mRes.ok) {
+                        const mData = await mRes.json();
+                        if (mData.items && mData.items.length > 0) {
+                            mCard.style.display = 'block';
+                            mCount.innerText = `${mData.items.length} notice${mData.items.length === 1 ? '' : 's'}`;
+                            mList.innerHTML = mData.items.map(m => {
+                                const start = m.start_unix ? new Date(m.start_unix * 1000).toLocaleString() : 'сейчас';
+                                const end = m.end_unix ? new Date(m.end_unix * 1000).toLocaleString() : 'до завершения';
+                                const scope = m.scope === 'global' ? 'Глобальные работы' : m.node_ids && m.node_ids.length > 0 ? `Ноды: ${m.node_ids.join(', ')}` : 'Локальные работы';
+                                const statusPill = m.active ? '<span class="pill pill-down" style="background: rgba(227, 179, 65, 0.15); color: var(--accent-yellow); border-color: rgba(227, 179, 65, 0.3);">В процессе</span>' : '<span class="pill pill-active">Запланировано</span>';
+                                return `
+                                <div class="service-row">
+                                    <div>
+                                        <strong style="font-size: 0.95rem; color: var(--text-primary);">${m.reason || 'Регламентные технические работы'}</strong>
+                                        <div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px;">
+                                            ${scope} &bull; ${start} — ${end}
+                                        </div>
+                                    </div>
+                                    ${statusPill}
+                                </div>`;
+                            }).join('');
+                        } else {
+                            mCard.style.display = 'none';
+                        }
+                    }
+                } catch (e) {
+                    console.error('maintenance fetch failed', e);
                 }
 
                 const iList = document.getElementById('incidents-list');
