@@ -347,6 +347,22 @@ func main() {
 		json.NewEncoder(w).Encode(pStore.GetPublicFleetSummary())
 	})
 
+	mux.HandleFunc("GET /api/v1/public/badge", func(w http.ResponseWriter, r *http.Request) {
+		label := r.URL.Query().Get("label")
+		if label == "" {
+			label = "status"
+		}
+		status := pStore.GetPublicFleetSummary().Status
+		if v := r.URL.Query().Get("type"); v == "uptime" {
+			label = "uptime"
+			status = fmt.Sprintf("%.1f%%", pStore.GetPublicFleetSummary().Uptime7dPct)
+		}
+		svg := store.RenderSVGStatusBadge(label, status)
+		w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=60, s-maxage=60")
+		w.Write([]byte(svg))
+	})
+
 	mux.HandleFunc("GET /api/v1/public/incidents", func(w http.ResponseWriter, r *http.Request) {
 		limit := 50
 		if v := r.URL.Query().Get("limit"); v != "" {
