@@ -63,6 +63,15 @@ func (p *PersistentStore) runJanitorPass() {
 		log.Printf("[janitor] auto-resolved %d abandoned incidents", n)
 	}
 
+	// Silent-node watchdog: open "Node Silent" incidents for nodes whose
+	// heartbeat is older than silentNodeTTL, and close them back down
+	// once the agent resumes shipping. Bound to janitorInterval so a
+	// silent node is caught within a single sweep.
+	if r := p.SilentNodeWatchdog(time.Now()); r.IncidentsRaised > 0 || r.IncidentsResolved > 0 {
+		log.Printf("[janitor] silent-node watchdog: raised=%d resolved=%d checked=%d",
+			r.IncidentsRaised, r.IncidentsResolved, r.NodesChecked)
+	}
+
 	cutoff := time.Now().Add(-incidentRetentionDays * 24 * time.Hour).Unix()
 
 	// Resolved incidents older than the retention window.
