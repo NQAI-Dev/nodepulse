@@ -37,17 +37,25 @@ func TestSignAndVerifyCallbackData(t *testing.T) {
 
 func TestBuildIncidentButtons(t *testing.T) {
 	rows := BuildIncidentButtons("7", "")
-	if len(rows) != 1 {
-		t.Fatalf("expected 1 row, got %d", len(rows))
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows (ack/resolve + snooze shortcuts), got %d", len(rows))
 	}
 	if len(rows[0]) != 2 {
-		t.Fatalf("expected 2 buttons, got %d", len(rows[0]))
+		t.Fatalf("expected 2 buttons in row 0, got %d", len(rows[0]))
 	}
 	if !strings.HasPrefix(rows[0][0].CallbackData, ActionAckPrefix+"7") {
 		t.Fatalf("ack data missing prefix: %q", rows[0][0].CallbackData)
 	}
 	if !strings.HasPrefix(rows[0][1].CallbackData, ActionResolvePrefix+"7") {
 		t.Fatalf("resolve data missing prefix: %q", rows[0][1].CallbackData)
+	}
+	if len(rows[1]) != 3 {
+		t.Fatalf("expected 3 snooze buttons in row 1, got %d", len(rows[1]))
+	}
+	for _, b := range rows[1] {
+		if !strings.HasPrefix(b.CallbackData, ActionSnoozePrefix+"7:") {
+			t.Fatalf("snooze button missing prefix: %q", b.CallbackData)
+		}
 	}
 
 	signed := BuildIncidentButtons("9", "secret")
@@ -58,6 +66,53 @@ func TestBuildIncidentButtons(t *testing.T) {
 	action, id, ok := VerifyCallbackData("secret", signed[0][0].CallbackData)
 	if !ok || action != "ack" || id != "9" {
 		t.Fatalf("signed verify failed: %s %s %v", action, id, ok)
+	}
+}
+
+func TestSignAndVerifySnoozeCallback(t *testing.T) {
+	const secret = "bot-token-xyz"
+	id := "42"
+
+	for _, dur := range AllowedSnoozeKeys() {
+		signed := SignSnoozeCallback(secret, id, dur)
+		gotID, gotDur, ok := VerifySnoozeCallback(secret, signed)
+		if !ok || gotID != id || gotDur != dur {
+			t.Fatalf("snooze verify %s: id=%q dur=%q ok=%v", dur, gotID, gotDur, ok)
+		}
+	}
+
+	// Wrong secret rejects.
+	if _, _, ok := VerifySnoozeCallback("wrong", SignSnoozeCallback(secret, id, "1h")); ok {
+		t.Fatalf("verify accepted wrong secret")
+	}
+
+	// Disallowed duration (24h, even if it parses as a snooze duration) is
+	// rejected at the parse layer; the dispatcher only ever produces the
+	// three canonical keys, but the verifier must not trust caller input.
+	if _, _, ok := VerifySnoozeCallback(secret, "np:snooze:1:24h.xxx"); ok {
+		t.Fatalf("verify accepted non-canonical duration")
+	}
+
+	// Unsigned form (no secret configured).
+	unsigned := SignSnoozeCallback("", id, "4h")
+	gotID, gotDur, ok := VerifySnoozeCallback("", unsigned)
+	if !ok || gotID != id || gotDur != "4h" {
+		t.Fatalf("unsigned snooze verify failed: id=%q dur=%q ok=%v", gotID, gotDur, ok)
+	}
+}
+
+func TestSnoozeSeconds(t *testing.T) {
+	if SnoozeSeconds("1h") != 3600 {
+		t.Fatalf("1h != 3600")
+	}
+	if SnoozeSeconds("4h") != 4*3600 {
+		t.Fatalf("4h wrong")
+	}
+	if SnoozeSeconds("8h") != 8*3600 {
+		t.Fatalf("8h wrong")
+	}
+	if SnoozeSeconds("12h") != 0 {
+		t.Fatalf("unknown key must return 0, got %d", SnoozeSeconds("12h"))
 	}
 }
 

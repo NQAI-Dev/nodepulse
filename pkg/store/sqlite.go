@@ -127,6 +127,11 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	// public status timeline and operator audit can tell *why* an incident
 	// closed itself without joining against heartbeat history.
 	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN resolution_reason TEXT DEFAULT ''")
+	// snoozed_until: unix timestamp until which re-notifications for this
+	// incident are suppressed. 0 = not snoozed. Operators set it via the
+	// Telegram inline-keyboard snooze shortcut; the alert path checks it
+	// inside notifyAfterCreate so no extra round-trip is needed.
+	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN snoozed_until INTEGER DEFAULT 0")
 
 	// incident_notes: free-form operator comments attached to an incident.
 	// Rendered alongside the existing audit timeline (ack/resolve events)
@@ -493,10 +498,11 @@ func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string)
 
 	var openID int64
 	var lastNotified int64
+	var snoozedUntil int64
 	err := p.db.QueryRow(
-		"SELECT id, last_notified_at FROM incidents WHERE node_id = ? AND title = ? AND resolved = 0 ORDER BY id DESC LIMIT 1",
+		"SELECT id, last_notified_at, COALESCE(snoozed_until, 0) FROM incidents WHERE node_id = ? AND title = ? AND resolved = 0 ORDER BY id DESC LIMIT 1",
 		nodeID, title,
-	).Scan(&openID, &lastNotified)
+	).Scan(&openID, &lastNotified, &snoozedUntil)
 
 	if err == sql.ErrNoRows {
 		// No open incident: create one and notify. Pull the freshly minted
@@ -522,6 +528,12 @@ func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string)
 	// Open incident already exists. Refresh detail (it's the latest snapshot)
 	// and decide whether to re-notify.
 	p.db.Exec("UPDATE incidents SET detail = ? WHERE id = ?", detail, openID)
+
+	// Snooze wins over the cooldown gate: if the operator muted the alert,
+	// we don't re-notify even if cooldown expired.
+	if snoozedUntil > nowUnix {
+		return
+	}
 
 	if lastNotified == 0 || nowUnix-lastNotified >= int64(cooldownFor(severity).Seconds()) {
 		p.db.Exec("UPDATE incidents SET last_notified_at = ? WHERE id = ?", nowUnix, openID)

@@ -811,6 +811,31 @@ func main() {
 			}
 			disp.AnswerCallback(req.CallbackQueryID, "🛠 Resolved")
 			log.Printf("[tg-callback] resolve incident=%s", incidentID)
+		case "snooze":
+			// Snooze lives on its own prefix because the body carries an
+			// extra `:<dur>` segment after the id; the generic
+			// VerifyCallbackData only parses the (action, id) pair.
+			snoozeID, durKey, ok := alerter.VerifySnoozeCallback(disp.CallbackSecret(), req.Data)
+			if !ok {
+				http.Error(w, `{"error":"invalid snooze payload"}`, http.StatusForbidden)
+				return
+			}
+			until, err := pStore.SnoozeIncident(snoozeID, alerter.SnoozeSeconds(durKey))
+			if err != nil {
+				switch {
+				case errors.Is(err, store.ErrSnoozeIncidentNotFound):
+					disp.AnswerCallback(req.CallbackQueryID, "⚠️ Already resolved or not found")
+					http.Error(w, `{"error":"incident not found"}`, http.StatusNotFound)
+				case errors.Is(err, store.ErrSnoozeDurationInvalid):
+					disp.AnswerCallback(req.CallbackQueryID, "⚠️ Invalid snooze duration")
+					http.Error(w, `{"error":"invalid duration"}`, http.StatusBadRequest)
+				default:
+					http.Error(w, `{"error":"snooze failure"}`, http.StatusInternalServerError)
+				}
+				return
+			}
+			disp.AnswerCallback(req.CallbackQueryID, fmt.Sprintf("🔕 Snoozed for %s", durKey))
+			log.Printf("[tg-callback] snooze incident=%s dur=%s until=%d", snoozeID, durKey, until)
 		default:
 			http.Error(w, `{"error":"unknown action"}`, http.StatusBadRequest)
 			return
