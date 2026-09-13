@@ -787,6 +787,14 @@ func (p *PersistentStore) Alerter() alerter.Notifier { return p.alerter }
 // if the value ever becomes per-user-only, drop this and read from user_settings directly.
 func (p *PersistentStore) DefaultChatID() int64 { return p.defaultChatID }
 
+// DB exposes the underlying *sql.DB so handlers and tests can run ad-hoc
+// maintenance queries (schema inspection, migration verification, force-
+// failure fixtures). All production read/write paths must keep going
+// through the typed methods on *PersistentStore — this accessor is for
+// the surfaces that have no typed wrapper (notably cmd/server tests
+// that need to DROP TABLE to simulate schema drift).
+func (p *PersistentStore) DB() *sql.DB { return p.db }
+
 // Ping verifies the underlying SQLite handle is reachable. Used by the
 // /api/v1/ready endpoint to distinguish liveness (process up, /health)
 // from readiness (DB roundtrip succeeds). Wraps *sql.DB.PingContext so

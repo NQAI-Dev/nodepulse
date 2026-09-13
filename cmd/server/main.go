@@ -304,67 +304,12 @@ func main() {
 		json.NewEncoder(w).Encode(usage)
 	})
 
-	// 3. Ingestion endpoint for agents (validates token, evaluates autoheal & limits)
+	// 3. Ingestion endpoint for agents (validates token, evaluates autoheal & limits).
+	// Handler body lives in file-scope handleHeartbeatIngest so it can be
+	// unit-tested against an injected *store.PersistentStore without
+	// spinning up the full mux.
 	mux.HandleFunc("POST /api/v1/ingest", func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get("X-NodePulse-Token")
-		if token == "" {
-			token = r.URL.Query().Get("token")
-		}
-
-		uid, _, err := pStore.GetUserByToken(token)
-		if err != nil && !pStore.IsMasterToken(token) {
-			http.Error(w, `{"error":"unauthorized node token"}`, http.StatusUnauthorized)
-			return
-		}
-
-		var hb protocol.Heartbeat
-		if err := json.NewDecoder(r.Body).Decode(&hb); err != nil || hb.NodeID == "" {
-			http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
-			return
-		}
-
-		if uid > 0 {
-			if !pStore.CanAddNode(uid) {
-				http.Error(w, `{"error":"node limit reached, upgrade to PRO"}`, http.StatusPaymentRequired)
-				return
-			}
-			if err := pStore.BindNode(hb.NodeID, uid); err != nil {
-				log.Printf("[heartbeat] %v", err)
-				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-				return
-			}
-		}
-		pStore.Ingest(&hb)
-
-		// Persist synthetic HTTP probe results (if the agent sent any).
-		// Failures here must NOT poison the heartbeat response — the
-		// probe pipeline is best-effort telemetry, never a hard
-		// dependency of ingest. Enforce the per-user probe URL budget
-		// before writing: free-tier users capped at FreeProbeLimit
-		// distinct URLs across their fleet, pro is unlimited.
-		if len(hb.Probes) > 0 {
-			if uid > 0 && !pStore.CanAddProbe(uid, probeURLs(hb.Probes)) {
-				log.Printf("probe quota exceeded for user %d on node %s", uid, hb.NodeID)
-				// Drop the offending batch but keep the heartbeat ack
-				// green — the operator can fix the agent config and the
-				// next heartbeat will resume collection.
-				hb.Probes = nil
-			}
-			if len(hb.Probes) > 0 {
-				if err := pStore.RecordProbeResults(hb.NodeID, hb.Probes); err != nil {
-					log.Printf("probe persist failed for node %s: %v", hb.NodeID, err)
-				}
-			}
-		}
-
-		// Evaluate auto-heal remediation commands
-		commands := pStore.EvaluateAutoHeal(&hb)
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(protocol.HeartbeatResponse{
-			Acknowledged: true,
-			Commands:     commands,
-		})
+		handleHeartbeatIngest(w, r, pStore)
 	})
 
 	mux.HandleFunc("POST /api/v1/autoheal/log", func(w http.ResponseWriter, r *http.Request) {
@@ -1714,4 +1659,88 @@ systemctl enable --now nodepulse-agent.service
 echo "==> [NodePulse] Agent installed and registered successfully as ${NODE_ID}!"
 `, token, token)
 	w.Write([]byte(script))
+}
+
+// handleHeartbeatIngest validates and records an agent's heartbeat.
+//
+// Flow: read the node token (header or ?token= fallback) → resolve the
+// owning user via GetUserByToken, with master-token impersonation →
+// decode the JSON heartbeat payload → enforce the per-user node limit
+// (free-tier cap, requires upgrade past limit) → bind the node to the
+// user (BindNode is a write — failure here used to be silently masked by
+// the silent-p.db.Exec class; b6842be converted it to error-returning,
+// so we surface a 500 instead of pretending the heartbeat succeeded).
+// Persist the synthetic probe results best-effort (probe pipeline is
+// telemetry, not a hard dependency of ingest), evaluate auto-heal
+// remediation commands, and acknowledge.
+//
+// File-scope (not a closure inside main) so that handlers can be
+// exercised in isolation by unit tests against a real *PersistentStore —
+// see TestHeartbeatIngest_BindNodeFailure in main_test.go for the
+// regression that pins the BindNode error path.
+func handleHeartbeatIngest(w http.ResponseWriter, r *http.Request, pStore *store.PersistentStore) {
+	token := r.Header.Get("X-NodePulse-Token")
+	if token == "" {
+		token = r.URL.Query().Get("token")
+	}
+
+	uid, _, err := pStore.GetUserByToken(token)
+	if err != nil && !pStore.IsMasterToken(token) {
+		http.Error(w, `{"error":"unauthorized node token"}`, http.StatusUnauthorized)
+		return
+	}
+
+	var hb protocol.Heartbeat
+	if err := json.NewDecoder(r.Body).Decode(&hb); err != nil || hb.NodeID == "" {
+		http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	if uid > 0 {
+		if !pStore.CanAddNode(uid) {
+			http.Error(w, `{"error":"node limit reached, upgrade to PRO"}`, http.StatusPaymentRequired)
+			return
+		}
+		if err := pStore.BindNode(hb.NodeID, uid); err != nil {
+			// BindNode failure must surface as 500, not a silent
+			// discarded-error swallow. The silent-p.db.Exec anti-pattern
+			// that previously lived here masked schema drift on
+			// node_owners until the 2026-09-13 prod incident forced a
+			// full audit.
+			log.Printf("[heartbeat] bind node %q to uid=%d failed: %v", hb.NodeID, uid, err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+	}
+	pStore.Ingest(&hb)
+
+	// Persist synthetic HTTP probe results (if the agent sent any).
+	// Failures here must NOT poison the heartbeat response — the probe
+	// pipeline is best-effort telemetry, never a hard dependency of
+	// ingest. Enforce the per-user probe URL budget before writing: free
+	// users capped at FreeProbeLimit distinct URLs across their fleet,
+	// pro is unlimited.
+	if len(hb.Probes) > 0 {
+		if uid > 0 && !pStore.CanAddProbe(uid, probeURLs(hb.Probes)) {
+			log.Printf("probe quota exceeded for user %d on node %s", uid, hb.NodeID)
+			// Drop the offending batch but keep the heartbeat ack green
+			// — the operator can fix the agent config and the next
+			// heartbeat will resume collection.
+			hb.Probes = nil
+		}
+		if len(hb.Probes) > 0 {
+			if err := pStore.RecordProbeResults(hb.NodeID, hb.Probes); err != nil {
+				log.Printf("probe persist failed for node %s: %v", hb.NodeID, err)
+			}
+		}
+	}
+
+	// Evaluate auto-heal remediation commands
+	commands := pStore.EvaluateAutoHeal(&hb)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(protocol.HeartbeatResponse{
+		Acknowledged: true,
+		Commands:     commands,
+	})
 }
