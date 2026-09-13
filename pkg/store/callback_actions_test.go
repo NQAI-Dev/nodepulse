@@ -16,8 +16,8 @@ func TestAcknowledgeIncident(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	s.BindNode("node-ack", uid)
-	s.CreateIncident("node-ack", "warning", "Disk filling", "usage 91%")
+	_ = s.BindNode("node-ack", uid)
+	_ = s.CreateIncident("node-ack", "warning", "Disk filling", "usage 91%")
 
 	incs := s.GetActiveIncidents(uid)
 	if len(incs) != 1 {

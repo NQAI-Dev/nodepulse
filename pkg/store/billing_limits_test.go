@@ -32,7 +32,7 @@ func TestCanAddNode_FreeUserRespectsLimit(t *testing.T) {
 		t.Fatal("free user with zero nodes must be allowed to add one")
 	}
 	for i := 0; i < FreeNodeLimit; i++ {
-		s.BindNode("node-"+string(rune('a'+i)), uidAlice)
+		_ = s.BindNode("node-"+string(rune('a'+i)), uidAlice)
 	}
 	if s.CanAddNode(uidAlice) {
 		t.Fatalf("free user with %d nodes must be blocked", FreeNodeLimit)
@@ -44,7 +44,7 @@ func TestCanAddNode_ProIsUnlimited(t *testing.T) {
 	uid, _, _ := s.Register("bob", "secret123")
 	s.db.Exec(`UPDATE users SET plan='pro', pro_until=datetime('now','+30 days') WHERE id=?`, uid)
 	for i := 0; i < FreeNodeLimit+5; i++ {
-		s.BindNode("node-"+string(rune('a'+i)), uid)
+		_ = s.BindNode("node-"+string(rune('a'+i)), uid)
 	}
 	if !s.CanAddNode(uid) {
 		t.Fatal("pro user must never be blocked by node quota")
@@ -54,7 +54,7 @@ func TestCanAddNode_ProIsUnlimited(t *testing.T) {
 func TestCanAddProbe_FreeUserBudgetsURLs(t *testing.T) {
 	s := newBillingStore(t)
 	uid, _, _ := s.Register("carol", "secret123")
-	s.BindNode("node-x", uid)
+	_ = s.BindNode("node-x", uid)
 
 	// Seed probe_results so the URL-already-known path is exercised.
 	// 3 known URLs leaves room for 2 more new URLs before the cap.
@@ -91,7 +91,7 @@ func TestCanAddProbe_ProIsUnlimited(t *testing.T) {
 func TestCanAddProbe_AlreadyKnownURLsDontCount(t *testing.T) {
 	s := newBillingStore(t)
 	uid, _, _ := s.Register("erin", "secret123")
-	s.BindNode("node-y", uid)
+	_ = s.BindNode("node-y", uid)
 
 	// Saturate the quota with 5 known URLs.
 	now := int64(1_700_000_000)
@@ -111,7 +111,7 @@ func TestCanAddProbe_AlreadyKnownURLsDontCount(t *testing.T) {
 func TestGetPlanUsage_FreeShape(t *testing.T) {
 	s := newBillingStore(t)
 	uid, _, _ := s.Register("frank", "secret123")
-	s.BindNode("node-z", uid)
+	_ = s.BindNode("node-z", uid)
 	s.RecordProbeResults("node-z", []protocol.ProbeResult{{URL: "https://x.test", Ts: 1}})
 
 	u, err := s.GetPlanUsage(uid)

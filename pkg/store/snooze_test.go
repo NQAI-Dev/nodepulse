@@ -22,7 +22,7 @@ func newSnoozeTestStore(t *testing.T) *PersistentStore {
 
 func TestSnoozeIncident_Basic(t *testing.T) {
 	p := newSnoozeTestStore(t)
-	p.CreateIncident("node-a", "warning", "Container Stopped: web", "")
+	_ = p.CreateIncident("node-a", "warning", "Container Stopped: web", "")
 
 	id := mustOpenIncidentID(t, p, "node-a")
 	if id == "" {
@@ -43,7 +43,7 @@ func TestSnoozeIncident_Basic(t *testing.T) {
 
 func TestSnoozeIncident_RejectsBadDuration(t *testing.T) {
 	p := newSnoozeTestStore(t)
-	p.CreateIncident("node-a", "warning", "Container Stopped: web", "")
+	_ = p.CreateIncident("node-a", "warning", "Container Stopped: web", "")
 	id := mustOpenIncidentID(t, p, "node-a")
 
 	for _, bad := range []int64{0, -1, 25 * 3600, 7 * 24 * 3600} {
@@ -55,7 +55,7 @@ func TestSnoozeIncident_RejectsBadDuration(t *testing.T) {
 
 func TestSnoozeIncident_UnknownOrResolved(t *testing.T) {
 	p := newSnoozeTestStore(t)
-	p.CreateIncident("node-a", "warning", "Container Stopped: web", "")
+	_ = p.CreateIncident("node-a", "warning", "Container Stopped: web", "")
 	id := mustOpenIncidentID(t, p, "node-a")
 
 	if _, err := p.SnoozeIncident("99999", 3600); err != ErrSnoozeIncidentNotFound {
@@ -78,7 +78,7 @@ func TestSnoozeIncident_SuppressesReNotify(t *testing.T) {
 	rec := &alerterRecordingNotifier{}
 	p.SetNotifier(rec)
 
-	p.CreateIncident("node-a", "critical", "Container Stopped: web", "")
+	_ = p.CreateIncident("node-a", "critical", "Container Stopped: web", "")
 	if len(rec.Incidents) != 1 {
 		t.Fatalf("first CreateIncident must notify, got %d", len(rec.Incidents))
 	}
@@ -89,7 +89,7 @@ func TestSnoozeIncident_SuppressesReNotify(t *testing.T) {
 	}
 
 	// Re-fire: cooldown for critical is 60s, but snooze must override it.
-	p.CreateIncident("node-a", "critical", "Container Stopped: web", "stale detail")
+	_ = p.CreateIncident("node-a", "critical", "Container Stopped: web", "stale detail")
 	if len(rec.Incidents) != 1 {
 		t.Fatalf("snoozed CreateIncident must NOT re-notify, got %d calls", len(rec.Incidents))
 	}
@@ -104,7 +104,7 @@ func TestSnoozeIncident_ExpiresAndReNotifies(t *testing.T) {
 	rec := &alerterRecordingNotifier{}
 	p.SetNotifier(rec)
 
-	p.CreateIncident("node-a", "critical", "Container Stopped: web", "")
+	_ = p.CreateIncident("node-a", "critical", "Container Stopped: web", "")
 	id := mustOpenIncidentID(t, p, "node-a")
 
 	if _, err := p.SnoozeIncident(id, 1); err != nil {
@@ -120,7 +120,7 @@ func TestSnoozeIncident_ExpiresAndReNotifies(t *testing.T) {
 		t.Fatalf("expire snooze: %v", err)
 	}
 
-	p.CreateIncident("node-a", "critical", "Container Stopped: web", "after snooze")
+	_ = p.CreateIncident("node-a", "critical", "Container Stopped: web", "after snooze")
 	if len(rec.Incidents) != 2 {
 		t.Fatalf("expected re-notify after snooze expired, got %d", len(rec.Incidents))
 	}

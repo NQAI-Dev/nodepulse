@@ -20,7 +20,7 @@ func TestIncidentThrottleWithinCooldown(t *testing.T) {
 	}
 
 	for i := 0; i < 5; i++ {
-		s.CreateIncident("node-throttle", "warning", "High Memory Pressure", "98.2% RAM")
+		_ = s.CreateIncident("node-throttle", "warning", "High Memory Pressure", "98.2% RAM")
 	}
 
 	inc := s.GetActiveIncidents(1)
@@ -44,7 +44,7 @@ func TestIncidentThrottleReFiresAfterCooldown(t *testing.T) {
 		t.Fatalf("init store: %v", err)
 	}
 
-	s.CreateIncident("node-x", "critical", "Container Stopped: web", "exited")
+	_ = s.CreateIncident("node-x", "critical", "Container Stopped: web", "exited")
 
 	// Force last_notified_at deep into the past so the next call passes the
 	// cooldown gate. We can update only the existing row, no second row.
@@ -54,7 +54,7 @@ func TestIncidentThrottleReFiresAfterCooldown(t *testing.T) {
 	}
 
 	// New crossing detail -- re-fires:
-	s.CreateIncident("node-x", "critical", "Container Stopped: web", "exited again")
+	_ = s.CreateIncident("node-x", "critical", "Container Stopped: web", "exited again")
 
 	inc := s.GetActiveIncidents(1)
 	if len(inc) != 1 {
@@ -77,7 +77,7 @@ func TestIncidentResolveAllowsRefire(t *testing.T) {
 		t.Fatalf("init store: %v", err)
 	}
 
-	s.CreateIncident("node-y", "warning", "High Memory Pressure", "96.0% RAM")
+	_ = s.CreateIncident("node-y", "warning", "High Memory Pressure", "96.0% RAM")
 	if len(s.GetActiveIncidents(1)) != 1 {
 		t.Fatalf("setup: expected 1 active")
 	}
@@ -90,7 +90,7 @@ func TestIncidentResolveAllowsRefire(t *testing.T) {
 		t.Fatalf("expected 0 active after resolve")
 	}
 
-	s.CreateIncident("node-y", "warning", "High Memory Pressure", "97.0% RAM")
+	_ = s.CreateIncident("node-y", "warning", "High Memory Pressure", "97.0% RAM")
 	if len(s.GetActiveIncidents(1)) != 1 {
 		t.Fatalf("expected a fresh incident after resolve+new crossing, got %d", len(s.GetActiveIncidents(1)))
 	}

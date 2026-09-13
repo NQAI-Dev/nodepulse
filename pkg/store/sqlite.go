@@ -819,10 +819,13 @@ func (p *PersistentStore) GetUserByToken(token string) (int64, string, error) {
 	return uid, uname, nil
 }
 
-func (p *PersistentStore) BindNode(nodeID string, userID int64) {
+func (p *PersistentStore) BindNode(nodeID string, userID int64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.db.Exec("INSERT OR REPLACE INTO node_owners (node_id, user_id) VALUES (?, ?)", nodeID, userID)
+	if _, err := p.db.Exec("INSERT OR REPLACE INTO node_owners (node_id, user_id) VALUES (?, ?)", nodeID, userID); err != nil {
+		return fmt.Errorf("bind node %q to uid=%d: %w", nodeID, userID, err)
+	}
+	return nil
 }
 
 func (p *PersistentStore) GetUserNodes(userID int64) map[string]*NodeState {
@@ -990,7 +993,7 @@ func cooldownFor(severity string) time.Duration {
 	return 5 * time.Minute
 }
 
-func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string) {
+func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -1013,33 +1016,39 @@ func (p *PersistentStore) CreateIncident(nodeID, severity, title, detail string)
 			"INSERT INTO incidents (node_id, severity, title, detail, started_at, resolved, last_notified_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
 			nodeID, severity, title, detail, nowUnix, nowUnix,
 		)
+		if ierr != nil {
+			return fmt.Errorf("create incident for node=%q title=%q: %w", nodeID, title, ierr)
+		}
 		var incidentID string
-		if ierr == nil {
-			if id, idErr := res.LastInsertId(); idErr == nil {
-				incidentID = fmt.Sprintf("%d", id)
-			}
+		if id, idErr := res.LastInsertId(); idErr == nil {
+			incidentID = fmt.Sprintf("%d", id)
 		}
 		p.notifyAfterCreate(incidentID, nodeID, severity, title, detail, nowUnix)
-		return
+		return nil
 	}
 	if err != nil {
-		return
+		return fmt.Errorf("lookup open incident for node=%q title=%q: %w", nodeID, title, err)
 	}
 
 	// Open incident already exists. Refresh detail (it's the latest snapshot)
 	// and decide whether to re-notify.
-	p.db.Exec("UPDATE incidents SET detail = ? WHERE id = ?", detail, openID)
+	if _, err := p.db.Exec("UPDATE incidents SET detail = ? WHERE id = ?", detail, openID); err != nil {
+		return fmt.Errorf("refresh incident detail for id=%d: %w", openID, err)
+	}
 
 	// Snooze wins over the cooldown gate: if the operator muted the alert,
 	// we don't re-notify even if cooldown expired.
 	if snoozedUntil > nowUnix {
-		return
+		return nil
 	}
 
 	if lastNotified == 0 || nowUnix-lastNotified >= int64(cooldownFor(severity).Seconds()) {
-		p.db.Exec("UPDATE incidents SET last_notified_at = ? WHERE id = ?", nowUnix, openID)
+		if _, err := p.db.Exec("UPDATE incidents SET last_notified_at = ? WHERE id = ?", nowUnix, openID); err != nil {
+			return fmt.Errorf("update last_notified_at for id=%d: %w", openID, err)
+		}
 		p.notifyAfterCreate(fmt.Sprintf("%d", openID), nodeID, severity, title, detail, nowUnix)
 	}
+	return nil
 }
 
 // notifyAfterCreate handles dispatch (Telegram + Webhook) for a freshly created
@@ -1239,22 +1248,29 @@ func (p *PersistentStore) GetAll() map[string]*NodeState {
 // ponytail: storage is inlined; if the rate of auto-heal attempts ever
 // exceeds ~50k/day across the fleet, swap the in-table storage for a
 // rolling windowed on-disk log file per node and drop this method.
-func (p *PersistentStore) RecordAutoHealLogs(nodeID string, _ int64, events []protocol.AutoHealLog) {
+//
+// Errors are surfaced rather than discarded: a failed tx.Commit means the
+// entire batch was lost, and a failed cleanup DELETE means the table will
+// grow unbounded. Both are the same bug class as the silent api_tokens
+// schema drift (19:30 UTC prod incident) — the data simply didn't persist
+// but the caller thought it did. Per-event INSERT failures stay non-fatal
+// (skip and continue) because they can be transient.
+func (p *PersistentStore) RecordAutoHealLogs(nodeID string, _ int64, events []protocol.AutoHealLog) error {
 	if len(events) == 0 {
-		return
+		return nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	tx, err := p.db.Begin()
 	if err != nil {
-		return
+		return fmt.Errorf("begin autoheal tx for node=%q: %w", nodeID, err)
 	}
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare("INSERT INTO autoheal_logs (node_id, command, status, reason, error, ts) VALUES (?, ?, ?, ?, ?, ?)")
 	if err != nil {
-		return
+		return fmt.Errorf("prepare autoheal insert for node=%q: %w", nodeID, err)
 	}
 	defer stmt.Close()
 	for _, ev := range events {
@@ -1262,13 +1278,22 @@ func (p *PersistentStore) RecordAutoHealLogs(nodeID string, _ int64, events []pr
 			continue
 		}
 		if _, err := stmt.Exec(nodeID, ev.Command, ev.Status, ev.Reason, ev.Error, ev.Ts); err != nil {
+			// Per-event failure is non-fatal: skip this row and keep
+			// going so a single bad event doesn't poison the batch.
+			// The overall commit error check below still catches
+			// transaction-level failures.
 			continue
 		}
 	}
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit autoheal tx for node=%q (events=%d): %w", nodeID, len(events), err)
+	}
 
 	cutoff := time.Now().Add(-24 * time.Hour).Unix()
-	p.db.Exec("DELETE FROM autoheal_logs WHERE ts < ?", cutoff)
+	if _, err := p.db.Exec("DELETE FROM autoheal_logs WHERE ts < ?", cutoff); err != nil {
+		return fmt.Errorf("cleanup autoheal_logs older than %d: %w", cutoff, err)
+	}
+	return nil
 }
 
 // RecentAutoHealLogs returns the last N auto-heal attempts for a node, newest first.

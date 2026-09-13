@@ -106,7 +106,7 @@ func TestEvaluateNetworkAlerts_OpensIncidents(t *testing.T) {
 	p.SetNotifier(rec)
 	// Mirror production ingest: bind the node so the notifier has an
 	// owner to look up settings for.
-	p.BindNode("node-e", 1)
+	_ = p.BindNode("node-e", 1)
 
 	rates := []NetworkRate{
 		{Iface: "eth0", RxErrorsPerSec: 5.0, TxErrorsPerSec: 0},

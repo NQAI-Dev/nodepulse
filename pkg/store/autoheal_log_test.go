@@ -23,7 +23,7 @@ func TestAutoHealLogPersistence(t *testing.T) {
 		{Command: "restart_docker:web", Status: "skipped", Reason: "circuit_open", Ts: now + 2, RetrySec: 240},
 		{Command: "restart_systemd:nginx", Status: "failed", Error: "unit not found", Ts: now + 3},
 	}
-	s.RecordAutoHealLogs("node-1", 0, events)
+	_ = s.RecordAutoHealLogs("node-1", 0, events)
 
 	logs := s.RecentAutoHealLogs("node-1", 10)
 	if len(logs) != 4 {
@@ -49,7 +49,7 @@ func TestAutoHealLogPrune(t *testing.T) {
 
 	old := time.Now().Add(-48 * time.Hour).Unix()
 	recent := time.Now().Unix()
-	s.RecordAutoHealLogs("node-prune", 0, []protocol.AutoHealLog{
+	_ = s.RecordAutoHealLogs("node-prune", 0, []protocol.AutoHealLog{
 		{Command: "restart_docker:alpha", Status: "ok", Ts: old},
 		{Command: "restart_docker:alpha", Status: "ok", Ts: old - 100},
 		{Command: "restart_docker:alpha", Status: "ok", Ts: recent},

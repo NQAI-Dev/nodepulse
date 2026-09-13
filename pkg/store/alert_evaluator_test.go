@@ -42,7 +42,7 @@ func TestEvaluateMetricAlert_FiresOnSustainedBreach(t *testing.T) {
 		t.Fatalf("create rule: %v", err)
 	}
 	// Bind owner so the ingest hook resolves the rule list.
-	p.BindNode("node-a", 1)
+	_ = p.BindNode("node-a", 1)
 
 	now := time.Now().Unix()
 
@@ -100,7 +100,7 @@ func TestEvaluateMetricAlert_ClearsOnRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create rule: %v", err)
 	}
-	p.BindNode("node-a", 1)
+	_ = p.BindNode("node-a", 1)
 
 	now := time.Now().Unix()
 	p.EvaluateMetricAlert("node-a", "1", MetricSample{
@@ -144,7 +144,7 @@ func TestEvaluateMetricAlert_IgnoresDisabledRule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create rule: %v", err)
 	}
-	p.BindNode("node-a", 1)
+	_ = p.BindNode("node-a", 1)
 
 	// Stomp the breach start so the threshold logic doesn't matter.
 	ev := p.alertEvaluator()
@@ -173,7 +173,7 @@ func TestEvaluateMetricAlert_LTOpExercises(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create rule: %v", err)
 	}
-	p.BindNode("node-a", 1)
+	_ = p.BindNode("node-a", 1)
 
 	p.EvaluateMetricAlert("node-a", "1", MetricSample{
 		NodeID: "node-a", CPUPercent: 2, MemUsedPct: 10, DiskUsedPct: 10,

@@ -90,7 +90,10 @@ func (p *PersistentStore) SilentNodeWatchdog(now time.Time) SilentNodeWatchdogRe
 			if state.LastHeartbeat.IsZero() {
 				detail = "No heartbeat recorded"
 			}
-			p.CreateIncident(nodeID, "critical", "Node Silent", detail)
+			if err := p.CreateIncident(nodeID, "critical", "Node Silent", detail); err != nil {
+				log.Printf("[silent-watchdog] open incident for node=%q: %v", nodeID, err)
+				continue
+			}
 			res.IncidentsRaised++
 			res.RaisedNodeIDs = append(res.RaisedNodeIDs, nodeID)
 			continue

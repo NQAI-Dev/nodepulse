@@ -309,7 +309,11 @@ func main() {
 				http.Error(w, `{"error":"node limit reached, upgrade to PRO"}`, http.StatusPaymentRequired)
 				return
 			}
-			pStore.BindNode(hb.NodeID, uid)
+			if err := pStore.BindNode(hb.NodeID, uid); err != nil {
+				log.Printf("[heartbeat] %v", err)
+				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+				return
+			}
 		}
 		pStore.Ingest(&hb)
 
@@ -364,7 +368,11 @@ func main() {
 			return
 		}
 
-		pStore.RecordAutoHealLogs(payload.NodeID, uid, payload.Events)
+		if err := pStore.RecordAutoHealLogs(payload.NodeID, uid, payload.Events); err != nil {
+			log.Printf("[autoheal] %v", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"accepted": true})

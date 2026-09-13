@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -125,7 +126,11 @@ func (p *PersistentStore) EvaluateMetricAlert(nodeID, ownerUserID string, sample
 						"metric=%s value=%.2f threshold=%.2f for=%ds",
 						rule.Metric, value, rule.Threshold, rule.ForSeconds,
 					)
-					p.CreateIncident(nodeID, rule.Severity, rule.Title, detail)
+					if err := p.CreateIncident(nodeID, rule.Severity, rule.Title, detail); err != nil {
+						log.Printf("[alert-eval] node=%q rule=%q: %v", nodeID, rule.Title, err)
+						ev.mu.Unlock()
+						continue
+					}
 					p.MarkAlertRuleFired(rule.ID)
 					ev.mu.Lock()
 					ev.firing[key] = incidentIDAfterCreate(p, nodeID, rule.Title)

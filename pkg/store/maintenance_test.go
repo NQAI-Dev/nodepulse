@@ -71,9 +71,9 @@ func TestMaintenanceWindow_NodeScope(t *testing.T) {
 	}
 
 	// user-7 owns both nodes; we tell the store via node_owners.
-	s.BindNode("web-1", 7)
-	s.BindNode("web-2", 7)
-	s.BindNode("db-1", 7)
+	_ = s.BindNode("web-1", 7)
+	_ = s.BindNode("web-2", 7)
+	_ = s.BindNode("db-1", 7)
 
 	cases := []struct {
 		node string
@@ -146,9 +146,9 @@ func TestMaintenanceWindow_AutoClose(t *testing.T) {
 	s := newMaintenanceTestStore(t)
 
 	// Two open incidents on n1; open one on n2.
-	s.CreateIncident("n1", "warning", "High CPU", "x")
-	s.CreateIncident("n1", "critical", "Container Stopped", "y")
-	s.CreateIncident("n2", "warning", "Disk filling", "z")
+	_ = s.CreateIncident("n1", "warning", "High CPU", "x")
+	_ = s.CreateIncident("n1", "critical", "Container Stopped", "y")
+	_ = s.CreateIncident("n2", "warning", "Disk filling", "z")
 
 	// Open a window covering n1 only.
 	if _, err := s.CreateMaintenanceWindow(1, protocol.MaintenanceWindowRequest{

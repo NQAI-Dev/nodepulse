@@ -16,7 +16,7 @@ func TestPublicIncidentHistoryIncludesResolved(t *testing.T) {
 		t.Fatalf("init: %v", err)
 	}
 	uid, _, _ := s.Register("alice", "pw")
-	s.BindNode("node-a", uid)
+	_ = s.BindNode("node-a", uid)
 
 	// Open a warning incident via heartbeat pressure, then resolve by recovery.
 	s.Ingest(&protocol.Heartbeat{NodeID: "node-a", Memory: protocol.MemoryStats{UsedPercent: 95.0}})
@@ -29,7 +29,7 @@ func TestPublicIncidentHistoryIncludesResolved(t *testing.T) {
 	}
 
 	// Add a fresh critical incident so we mix resolved + open.
-	s.CreateIncident("node-a", "critical", "Container Stopped: web", "exited")
+	_ = s.CreateIncident("node-a", "critical", "Container Stopped: web", "exited")
 
 	items, err := s.GetPublicIncidentHistory(0, 50)
 	if err != nil {
@@ -65,7 +65,7 @@ func TestPublicIncidentHistoryRespectsLimit(t *testing.T) {
 	}
 	for i := 0; i < 5; i++ {
 		// distinct titles so dedup doesn't fold them into a single row
-		s.CreateIncident("node-x", "warning", "Synthetic Event "+string(rune('a'+i)), "detail")
+		_ = s.CreateIncident("node-x", "warning", "Synthetic Event "+string(rune('a'+i)), "detail")
 	}
 	items, err := s.GetPublicIncidentHistory(0, 2)
 	if err != nil {

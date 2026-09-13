@@ -7,13 +7,13 @@ import (
 
 func TestGetIncidentHistory_RespectsFilters(t *testing.T) {
 	p := newTestStore(t)
-	p.BindNode("node-h", 1)
+	_ = p.BindNode("node-h", 1)
 
 	// Seed: 2 critical, 1 warning, one outside the 24h window.
 	now := time.Now().Unix()
-	p.CreateIncident("node-h", "critical", "DB Down", "primary unreachable")
-	p.CreateIncident("node-h", "warning", "High CPU", "load 5.2")
-	p.CreateIncident("node-h", "critical", "Old Outage", "very old")
+	_ = p.CreateIncident("node-h", "critical", "DB Down", "primary unreachable")
+	_ = p.CreateIncident("node-h", "warning", "High CPU", "load 5.2")
+	_ = p.CreateIncident("node-h", "critical", "Old Outage", "very old")
 
 	// Backdate the old incident so it falls outside the 24h window.
 	p.db.Exec("UPDATE incidents SET started_at = ? WHERE title = 'Old Outage'", now-48*3600)
@@ -29,10 +29,10 @@ func TestGetIncidentHistory_RespectsFilters(t *testing.T) {
 
 func TestGetIncidentHistory_SeverityFilter(t *testing.T) {
 	p := newTestStore(t)
-	p.BindNode("node-s", 1)
-	p.CreateIncident("node-s", "critical", "X", "x")
-	p.CreateIncident("node-s", "warning", "Y", "y")
-	p.CreateIncident("node-s", "warning", "Z", "z")
+	_ = p.BindNode("node-s", 1)
+	_ = p.CreateIncident("node-s", "critical", "X", "x")
+	_ = p.CreateIncident("node-s", "warning", "Y", "y")
+	_ = p.CreateIncident("node-s", "warning", "Z", "z")
 
 	crits, _ := p.GetIncidentHistory(1, "7d", "node-s", "critical", 10)
 	if len(crits) != 1 {
@@ -46,10 +46,10 @@ func TestGetIncidentHistory_SeverityFilter(t *testing.T) {
 
 func TestGetIncidentHistory_LimitClamp(t *testing.T) {
 	p := newTestStore(t)
-	p.BindNode("node-l", 1)
+	_ = p.BindNode("node-l", 1)
 	for i := 0; i < 10; i++ {
 		// Unique titles so the per-(node,title) throttling doesn't merge them.
-		p.CreateIncident("node-l", "warning", "Fill"+intToA(int64(i)), "x")
+		_ = p.CreateIncident("node-l", "warning", "Fill"+intToA(int64(i)), "x")
 	}
 	// Limit 0 should fall back to default 100.
 	hist, _ := p.GetIncidentHistory(1, "7d", "node-l", "", 0)
@@ -65,8 +65,8 @@ func TestGetIncidentHistory_LimitClamp(t *testing.T) {
 
 func TestGetIncidentHistory_UnknownRangeFallsBack(t *testing.T) {
 	p := newTestStore(t)
-	p.BindNode("node-u", 1)
-	p.CreateIncident("node-u", "warning", "x", "y")
+	_ = p.BindNode("node-u", 1)
+	_ = p.CreateIncident("node-u", "warning", "x", "y")
 	hist, _ := p.GetIncidentHistory(1, "bogus", "node-u", "", 10)
 	if len(hist) != 1 {
 		t.Fatalf("unknown range should still return data, got %d", len(hist))
@@ -75,8 +75,8 @@ func TestGetIncidentHistory_UnknownRangeFallsBack(t *testing.T) {
 
 func TestGetIncidentHistory_IncludesResolved(t *testing.T) {
 	p := newTestStore(t)
-	p.BindNode("node-r", 1)
-	p.CreateIncident("node-r", "critical", "Firesale", "details")
+	_ = p.BindNode("node-r", 1)
+	_ = p.CreateIncident("node-r", "critical", "Firesale", "details")
 	id, _ := resolveFirst(p, "Firesale")
 	if id == "" {
 		t.Fatal("expected to find created incident id")
@@ -89,13 +89,13 @@ func TestGetIncidentHistory_IncludesResolved(t *testing.T) {
 
 func TestGetIncidentStats_BucketLayout(t *testing.T) {
 	p := newTestStore(t)
-	p.BindNode("node-b", 1)
+	_ = p.BindNode("node-b", 1)
 	for i := 0; i < 3; i++ {
 		// Unique titles so each CreateIncident lands as a fresh row.
-		p.CreateIncident("node-b", "warning", "W"+intToA(int64(i)), "x")
+		_ = p.CreateIncident("node-b", "warning", "W"+intToA(int64(i)), "x")
 	}
 	for i := 0; i < 2; i++ {
-		p.CreateIncident("node-b", "critical", "C"+intToA(int64(i)), "x")
+		_ = p.CreateIncident("node-b", "critical", "C"+intToA(int64(i)), "x")
 	}
 	buckets, err := p.GetIncidentStats(1, "24h")
 	if err != nil {
@@ -118,8 +118,8 @@ func TestGetIncidentStats_BucketLayout(t *testing.T) {
 
 func TestGetIncidentStats_NetZeroAfterResolve(t *testing.T) {
 	p := newTestStore(t)
-	p.BindNode("node-net", 1)
-	p.CreateIncident("node-net", "critical", "Resolved Later", "x")
+	_ = p.BindNode("node-net", 1)
+	_ = p.CreateIncident("node-net", "critical", "Resolved Later", "x")
 	_, _ = resolveFirst(p, "Resolved Later")
 	buckets, _ := p.GetIncidentStats(1, "24h")
 	totalOpened := 0

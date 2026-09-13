@@ -19,8 +19,8 @@ func TestPrometheusMetricsShape(t *testing.T) {
 	// No Close on PersistentStore — in-memory SQLite is released when the
 	// *sql.DB handle is dropped. Tests don't need explicit cleanup.
 
-	s.CreateIncident("n1", "critical", "Docker Down", "x")
-	s.CreateIncident("n2", "warning", "High CPU", "y")
+	_ = s.CreateIncident("n1", "critical", "Docker Down", "x")
+	_ = s.CreateIncident("n2", "warning", "High CPU", "y")
 
 	body, err := s.PrometheusMetrics()
 	if err != nil {

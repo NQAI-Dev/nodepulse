@@ -19,7 +19,7 @@ func TestIncidentDispatcherRouting(t *testing.T) {
 		t.Fatalf("failed to register: %v", err)
 	}
 
-	s.BindNode("node-alice", uid)
+	_ = s.BindNode("node-alice", uid)
 
 	// Update settings with a webhook url
 	err = s.UpdateSettings(uid, "123456", "https://example.com/webhook", "shh", "https://hooks.slack.com/services/X", "https://discord.com/api/webhooks/1/a", true, true)
@@ -36,7 +36,7 @@ func TestIncidentDispatcherRouting(t *testing.T) {
 	}
 
 	// Create incident
-	s.CreateIncident("node-alice", "critical", "Docker Down", "Test detail")
+	_ = s.CreateIncident("node-alice", "critical", "Docker Down", "Test detail")
 
 	incidents := s.GetActiveIncidents(uid)
 	if len(incidents) != 1 {
