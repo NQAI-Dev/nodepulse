@@ -61,3 +61,25 @@ func (p *PersistentStore) IncidentOwner(id string) (int64, error) {
 	}
 	return owner, nil
 }
+
+// UserOwnsIncident reports whether uid owns the node that backs this
+// incident. Admin (uid=1) is treated as owner-of-everything so the public
+// audit path keeps working. Used to scope the notes endpoint so a token
+// from one tenant cannot enumerate notes on another tenant's incident.
+func (p *PersistentStore) UserOwnsIncident(uid int64, incidentID string) (bool, error) {
+	if uid <= 1 {
+		return true, nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var owner int64
+	err := p.db.QueryRow(`
+		SELECT o.user_id FROM incidents i
+		JOIN node_owners o ON o.node_id = i.node_id
+		WHERE i.id = ?`, incidentID).Scan(&owner)
+	if err != nil {
+		return false, nil
+	}
+	return owner == uid, nil
+}

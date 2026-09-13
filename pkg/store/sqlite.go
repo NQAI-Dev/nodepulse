@@ -127,6 +127,21 @@ func NewPersistentStore(dbPath string, botToken string, chatID int64) (*Persiste
 	// public status timeline and operator audit can tell *why* an incident
 	// closed itself without joining against heartbeat history.
 	_, _ = db.Exec("ALTER TABLE incidents ADD COLUMN resolution_reason TEXT DEFAULT ''")
+
+	// incident_notes: free-form operator comments attached to an incident.
+	// Rendered alongside the existing audit timeline (ack/resolve events)
+	// so on-call can hand off context. user_id + username are denormalized
+	// so we can render the author without joining against users. body is
+	// kept short on purpose — chat-grade notes, not post-mortems.
+	db.Exec(`CREATE TABLE IF NOT EXISTS incident_notes (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		incident_id TEXT NOT NULL,
+		user_id INTEGER NOT NULL,
+		username TEXT NOT NULL DEFAULT '',
+		body TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_incnotes_incident ON incident_notes(incident_id, created_at)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_incidents_active ON incidents(node_id, title, resolved)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_incidents_history ON incidents(started_at, resolved)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_autoheal_logs_node_ts ON autoheal_logs(node_id, ts)")

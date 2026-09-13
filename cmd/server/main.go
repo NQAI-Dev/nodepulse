@@ -821,6 +821,76 @@ func main() {
 		w.Write([]byte(`{"success":true}` + "\n"))
 	})
 
+	// Incident operator notes — chat-grade comments attached to a single
+	// incident. Used by the UI to render a hand-off timeline alongside the
+	// existing ack/resolve events. Authenticated; user_id + username come
+	// from the session so the audit trail is self-attributing.
+	mux.HandleFunc("POST /api/v1/incidents/{id}/notes", func(w http.ResponseWriter, r *http.Request) {
+		uid, uname, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		id := r.PathValue("id")
+		if id == "" {
+			http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
+			return
+		}
+		var req struct {
+			Body string `json:"body"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+			return
+		}
+		note, err := pStore.AddIncidentNote(id, uid, uname, req.Body)
+		switch {
+		case err == nil:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(note)
+		case errors.Is(err, store.ErrIncidentNoteEmpty):
+			http.Error(w, `{"error":"note body is empty"}`, http.StatusBadRequest)
+		case errors.Is(err, store.ErrIncidentNoteTooLong):
+			http.Error(w, `{"error":"note body exceeds 1024 chars"}`, http.StatusBadRequest)
+		case errors.Is(err, store.ErrIncidentNotFound):
+			http.Error(w, `{"error":"incident not found"}`, http.StatusNotFound)
+		default:
+			http.Error(w, `{"error":"add note failure"}`, http.StatusInternalServerError)
+		}
+	})
+
+	mux.HandleFunc("GET /api/v1/incidents/{id}/notes", func(w http.ResponseWriter, r *http.Request) {
+		uid, _, err := getUser(r)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		id := r.PathValue("id")
+		if id == "" {
+			http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
+			return
+		}
+		// Cheap ownership guard: admin (uid=1) sees everything; everyone
+		// else only the incidents attached to their own nodes. This mirrors
+		// the scoping used by GetIncidentHistory so a stale token can't
+		// enumerate notes for someone else's fleet.
+		owns, _ := pStore.UserOwnsIncident(uid, id)
+		if uid > 1 && !owns {
+			http.Error(w, `{"error":"incident not found"}`, http.StatusNotFound)
+			return
+		}
+		notes, err := pStore.ListIncidentNotes(id)
+		if err != nil {
+			http.Error(w, `{"error":"list notes failure"}`, http.StatusInternalServerError)
+			return
+		}
+		if notes == nil {
+			notes = []store.IncidentNote{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(notes)
+	})
+
 	mux.HandleFunc("POST /api/v1/maintenance", func(w http.ResponseWriter, r *http.Request) {
 		uid, uname, err := getUser(r)
 		if err != nil {
