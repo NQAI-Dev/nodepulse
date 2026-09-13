@@ -15,6 +15,7 @@ import (
 
 	"github.com/NQAI-Dev/nodepulse/pkg/autoheal"
 	"github.com/NQAI-Dev/nodepulse/pkg/collector"
+	"github.com/NQAI-Dev/nodepulse/pkg/policy"
 	"github.com/NQAI-Dev/nodepulse/pkg/probe"
 	"github.com/NQAI-Dev/nodepulse/pkg/protocol"
 )
@@ -62,7 +63,15 @@ func main() {
 
 	c := collector.New(*nodeID, units).WithTags(collector.TagsFromEnv(*tagsFlag))
 	client := &http.Client{Timeout: 5 * time.Second}
-	breaker := autoheal.NewBreaker()
+	// Adaptive remediation: classify each incoming command by its target's
+	// image/name/labels and pick a strategy (db / cache / stateless / ...)
+	// instead of one-size-fits-all. The breaker defaults to the legacy
+	// behaviour and switches to the per-class strategy the first time it
+	// sees a key. Once assigned, the class is sticky for the life of the
+	// agent: flipping a Postgres pod to the Stateless class mid-incident
+	// would be a great way to hammer its WAL.
+	classifyCmd := classifyCommandFunc(c)
+	breakers := newStrategyBreakers()
 
 	probeTargets := splitCSV(*probeURLs, os.Getenv("NODEPULSE_PROBE_URLS"))
 	prober := probe.NewRunner(probeTargets, *probeTimeout, *probeFollowRedirect)
@@ -168,11 +177,15 @@ func main() {
 			if err := json.NewDecoder(resp.Body).Decode(&hbResp); err == nil {
 				for _, cmd := range hbResp.Commands {
 					key := autoheal.Key(cmd)
+					class := classifyCmd(cmd)
+					strategy := policy.StrategyFor(class)
+					breaker := breakers.forKey(key, strategy)
+
 					decision := breaker.Allow(key)
 					ts := time.Now().Unix()
 
 					if !decision.Allowed {
-						log.Printf("Auto-heal %s skipped (%s, retry=%s)", key, decision.Reason, decision.RetryAfter)
+						log.Printf("Auto-heal %s skipped (%s, retry=%s) class=%s", key, decision.Reason, decision.RetryAfter, class)
 						pendingMu.Lock()
 						pending = append(pending, protocol.AutoHealLog{
 							Command:  key,
@@ -180,6 +193,7 @@ func main() {
 							Reason:   decision.Reason,
 							Ts:       ts,
 							RetrySec: int64(decision.RetryAfter.Seconds()),
+							Class:    string(class),
 						})
 						pendingMu.Unlock()
 						continue
@@ -207,6 +221,7 @@ func main() {
 						Status:  boolToStatus(execErr == nil),
 						Error:   errString(execErr),
 						Ts:      ts,
+						Class:   string(class),
 					})
 					pendingMu.Unlock()
 				}
@@ -236,6 +251,9 @@ func errString(e error) string {
 // splitCSV returns the comma-separated values from `direct` (the flag value)
 // with `fallback` used when direct is empty. Empty entries are dropped so
 // operators can leave trailing commas in their config without errors.
+// splitCSV returns the comma-separated values from `direct` (the flag value)
+// with `fallback` used when direct is empty. Empty entries are dropped so
+// operators can leave trailing commas in their config without errors.
 func splitCSV(direct, fallback string) []string {
 	src := direct
 	if src == "" {
@@ -252,4 +270,67 @@ func splitCSV(direct, fallback string) []string {
 		}
 	}
 	return out
+}
+
+// classifyCommandFunc returns a closure that classifies a command's
+// target into a remediation class. For Docker commands it consults the
+// most recent docker inventory snapshot; for systemd targets the class is
+// inferred from the service name only (no image to look at). The
+// collector cache means we don't hit the docker socket per command.
+func classifyCommandFunc(c *collector.Collector) func(string) policy.Class {
+	return func(cmd string) policy.Class {
+		_, target, err := collector.ParseCommand(cmd)
+		if err != nil || target == "" {
+			return policy.ClassDefault
+		}
+		action := strings.SplitN(cmd, ":", 2)[0]
+		services := c.LastServices()
+		for _, svc := range services {
+			if action == "restart_docker" && svc.Type == "docker" && svc.Name == target {
+				return policy.Classify(svc.Message, svc.Name, svc.Labels)
+			}
+		}
+		// systemd target — no image/labels; let the name heuristic work.
+		if action == "restart_systemd" {
+			return policy.Classify("", target, nil)
+		}
+		return policy.ClassDefault
+	}
+}
+
+// strategyBreakers is a tiny per-class breaker cache so a single
+// Postgres target doesn't drag 4 different breakers behind it. The
+// first call for a key pins the class; subsequent calls reuse the same
+// breaker. If we ever ship hot class changes, this needs a version field
+// on the breaker; for now sticky is the safe default.
+type strategyBreakers struct {
+	mu       sync.Mutex
+	breakers map[string]*autoheal.Breaker
+	classes  map[string]policy.Class
+}
+
+func newStrategyBreakers() *strategyBreakers {
+	return &strategyBreakers{
+		breakers: make(map[string]*autoheal.Breaker),
+		classes:  make(map[string]policy.Class),
+	}
+}
+
+func (s *strategyBreakers) forKey(key string, strat policy.Strategy) *autoheal.Breaker {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if b, ok := s.breakers[key]; ok {
+		return b
+	}
+	b := autoheal.NewBreakerWithStrategy(autoheal.Strategy{
+		Cooldown:    strat.Cooldown,
+		BurstLimit:  strat.BurstLimit,
+		BurstWindow: strat.BurstWindow,
+		OpenFor:     strat.OpenFor,
+	})
+	s.breakers[key] = b
+	// We don't currently emit the class to the breaker; it's logged with
+	// each skip / failure so telemetry can correlate.
+	s.classes[key] = strat.Class
+	return b
 }

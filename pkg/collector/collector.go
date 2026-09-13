@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +17,9 @@ type Collector struct {
 	nodeID        string
 	monitoredUnits []string
 	tags          []string
+
+	lastMu      sync.Mutex
+	lastServices []protocol.ServiceStatus
 }
 
 func New(nodeID string, monitoredUnits []string) *Collector {
@@ -125,5 +129,23 @@ func (c *Collector) Collect() (*protocol.Heartbeat, error) {
 		hb.Services = append(hb.Services, systemdServices...)
 	}
 
+	c.lastMu.Lock()
+	c.lastServices = hb.Services
+	c.lastMu.Unlock()
+
 	return hb, nil
+}
+
+// LastServices returns the most recent snapshot of the service inventory.
+// Returns nil before the first successful Collect(). Callers (autoheal
+// classifier) treat the absence as "no services" rather than failing.
+func (c *Collector) LastServices() []protocol.ServiceStatus {
+	c.lastMu.Lock()
+	defer c.lastMu.Unlock()
+	if len(c.lastServices) == 0 {
+		return nil
+	}
+	out := make([]protocol.ServiceStatus, len(c.lastServices))
+	copy(out, c.lastServices)
+	return out
 }

@@ -175,3 +175,63 @@ type stubErr string
 func (e stubErr) Error() string { return string(e) }
 
 func errStub(s string) error { return stubErr(s) }
+
+func TestNewBreakerWithStrategyOverridesDefaults(t *testing.T) {
+	s := Strategy{
+		Cooldown:    5 * time.Second,
+		BurstLimit:  2,
+		BurstWindow: time.Minute,
+		OpenFor:     90 * time.Second,
+	}
+	b := NewBreakerWithStrategy(s)
+	got := b.Strategy()
+	if got != s {
+		t.Fatalf("strategy mismatch: got %+v, want %+v", got, s)
+	}
+	if NewBreaker().Strategy() != DefaultStrategy {
+		t.Fatalf("NewBreaker must default to DefaultStrategy")
+	}
+}
+
+func TestNewBreakerWithStrategyZeroFallsBack(t *testing.T) {
+	b := NewBreakerWithStrategy(Strategy{}) // all zeros
+	if got := b.Strategy(); got != DefaultStrategy {
+		t.Fatalf("zero strategy must fall back to DefaultStrategy, got %+v", got)
+	}
+}
+
+func TestBreakerStrategyAppliesCooldown(t *testing.T) {
+	s := Strategy{Cooldown: 100 * time.Millisecond, BurstLimit: 5, BurstWindow: time.Minute, OpenFor: time.Minute}
+	b := NewBreakerWithStrategy(s)
+	key := "restart_docker:cache"
+	if !b.Allow(key).Allowed {
+		t.Fatalf("first Allow should pass")
+	}
+	if b.Allow(key).Allowed {
+		t.Fatalf("second Allow inside 100ms must be blocked")
+	}
+	time.Sleep(150 * time.Millisecond)
+	if !b.Allow(key).Allowed {
+		t.Fatalf("Allow after cooldown must pass")
+	}
+}
+
+func TestBreakerStrategyOpensFasterForTightBurst(t *testing.T) {
+	// Tight burst limit (2 failures) opens the circuit sooner than the
+	// default 5. Pins the contract that strategy.BurstLimit actually flows
+	// into the breaker state machine.
+	s := Strategy{Cooldown: time.Millisecond, BurstLimit: 2, BurstWindow: time.Minute, OpenFor: 10 * time.Second}
+	b := NewBreakerWithStrategy(s)
+	key := "restart_docker:tight"
+	b.Allow(key)
+	b.Record(key, errStub("boom"))
+	b.Allow(key)
+	b.Record(key, errStub("boom"))
+	got := b.Allow(key)
+	if got.Allowed {
+		t.Fatalf("circuit should be open after 2 failures with burst=2")
+	}
+	if got.Reason != "circuit_open" {
+		t.Fatalf("expected circuit_open, got %q", got.Reason)
+	}
+}

@@ -52,11 +52,12 @@ type NetStats struct {
 }
 
 type ServiceStatus struct {
-	Name    string `json:"name"`
-	Type    string `json:"type"` // systemd, docker, port
-	Active  bool   `json:"active"`
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
+	Name    string            `json:"name"`
+	Type    string            `json:"type"` // systemd, docker, port
+	Active  bool              `json:"active"`
+	Status  string            `json:"status"`
+	Message string            `json:"message,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
 }
 
 type Heartbeat struct {
@@ -88,6 +89,11 @@ type AutoHealLog struct {
 	Error    string `json:"error,omitempty"`
 	Ts       int64  `json:"ts"`
 	RetrySec int64  `json:"retry_sec,omitempty"`
+	// Class is the adaptive remediation class chosen for this target
+	// (db / cache / stateless / default / critical). Always populated so
+	// the control plane can attribute a skip or failure to the strategy
+	// that produced it.
+	Class string `json:"class,omitempty"`
 }
 
 // ProbeResult is one synthetic HTTP probe executed by the agent against a

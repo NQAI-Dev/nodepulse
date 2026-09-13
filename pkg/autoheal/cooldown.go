@@ -11,6 +11,13 @@
 //     attempts are short-circuited for a cool-down window. Default N=5,
 //     W=10m, open for 5m.
 //
+// The breaker is keyed by action:target but its parameters (cooldown,
+// burst limit, open window) come from a per-class Strategy supplied at
+// construction. The autoheal pipeline picks the strategy by classifying
+// the target (db / cache / stateless / default / critical) via the
+// policy package. A pure-Default Breaker (NewBreaker) keeps the legacy
+// behaviour for callers that haven't migrated.
+//
 // ponytail: limit of N attempts in W minutes follows a classic N-strikes
 // model. Replace with rolling-window EMR-based detection if/when false
 // positives from multi-attempt boot loops (where several restarts followed
@@ -22,6 +29,26 @@ import (
 	"sync"
 	"time"
 )
+
+// Strategy describes the per-class breaker parameters. It is intentionally
+// a tiny mirror of policy.Strategy — keeping the breaker package free of
+// a dependency on policy/ — so unit tests can build Strategies inline
+// without importing the classifier.
+type Strategy struct {
+	Cooldown    time.Duration
+	BurstLimit  int
+	BurstWindow time.Duration
+	OpenFor     time.Duration
+}
+
+// DefaultStrategy reproduces the original NewBreaker behaviour: 60s
+// cooldown, 5 failures inside 10m opens the circuit for 5m.
+var DefaultStrategy = Strategy{
+	Cooldown:    60 * time.Second,
+	BurstLimit:  5,
+	BurstWindow: 10 * time.Minute,
+	OpenFor:     5 * time.Minute,
+}
 
 type Breaker struct {
 	mu sync.Mutex
@@ -38,17 +65,44 @@ type Breaker struct {
 	opensAt     map[string]time.Time   // circuit-open-until timestamp
 }
 
+// NewBreaker returns a breaker with the legacy default parameters
+// (60s/5/10m/5m). Use NewBreakerWithStrategy to drive the breaker from a
+// classifier output.
 func NewBreaker() *Breaker {
+	return NewBreakerWithStrategy(DefaultStrategy)
+}
+
+// NewBreakerWithStrategy returns a breaker configured by s. A zero-value
+// Strategy falls back to DefaultStrategy so callers can wire a config
+// struct straight through without nil-guarding.
+func NewBreakerWithStrategy(s Strategy) *Breaker {
+	if s.Cooldown <= 0 || s.BurstLimit <= 0 || s.BurstWindow <= 0 || s.OpenFor <= 0 {
+		s = DefaultStrategy
+	}
 	return &Breaker{
-		cooldown:    60 * time.Second,
-		burstWindow: 10 * time.Minute,
-		burstLimit:  5,
-		openFor:     5 * time.Minute,
+		cooldown:    s.Cooldown,
+		burstWindow: s.BurstWindow,
+		burstLimit:  s.BurstLimit,
+		openFor:     s.OpenFor,
 		lastAttempt: make(map[string]time.Time),
 		attempts:    make(map[string][]time.Time),
 		failures:    make(map[string][]time.Time),
 		crashes:     make(map[string][]time.Time),
 		opensAt:     make(map[string]time.Time),
+	}
+}
+
+// Strategy returns the strategy parameters the breaker was constructed
+// with. It is a copy — mutating it does not change the breaker's
+// behaviour. Useful for telemetry surfaces that report the active floor.
+func (b *Breaker) Strategy() Strategy {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return Strategy{
+		Cooldown:    b.cooldown,
+		BurstLimit:  b.burstLimit,
+		BurstWindow: b.burstWindow,
+		OpenFor:     b.openFor,
 	}
 }
 

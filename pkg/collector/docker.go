@@ -58,6 +58,7 @@ func CollectDockerServices() []protocol.ServiceStatus {
 			Active:  active,
 			Status:  c.Status,
 			Message: c.Image,
+			Labels:  c.Labels,
 		})
 	}
 	return services
