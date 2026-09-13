@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -188,6 +189,15 @@ func main() {
 					breaker.Record(key, execErr)
 					if execErr != nil {
 						log.Printf("Auto-heal %s error: %v", key, execErr)
+						// Post-restart live check failure: the action itself
+						// returned an error but the breaker should know it's
+						// a crash-loop signal so it trips faster than the
+						// generic burst counter. Map ErrPostRestartDown and
+						// any wrapped variant of it to RecordCrash.
+						if errors.Is(execErr, collector.ErrPostRestartDown) {
+							breaker.RecordCrash(key)
+							log.Printf("Auto-heal %s crash-loop detected, breaker notified", key)
+						}
 					} else {
 						log.Printf("Auto-heal %s ok", key)
 					}
