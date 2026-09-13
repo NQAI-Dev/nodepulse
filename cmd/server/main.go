@@ -197,12 +197,9 @@ func main() {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		plan, _ := pStore.GetUserPlan(uid)
+		usage, _ := pStore.GetPlanUsage(uid)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"user_id": uid,
-			"plan":    plan,
-		})
+		json.NewEncoder(w).Encode(usage)
 	})
 
 	// 3. Ingestion endpoint for agents (validates token, evaluates autoheal & limits)
@@ -236,10 +233,21 @@ func main() {
 		// Persist synthetic HTTP probe results (if the agent sent any).
 		// Failures here must NOT poison the heartbeat response — the
 		// probe pipeline is best-effort telemetry, never a hard
-		// dependency of ingest.
+		// dependency of ingest. Enforce the per-user probe URL budget
+		// before writing: free-tier users capped at FreeProbeLimit
+		// distinct URLs across their fleet, pro is unlimited.
 		if len(hb.Probes) > 0 {
-			if err := pStore.RecordProbeResults(hb.NodeID, hb.Probes); err != nil {
-				log.Printf("probe persist failed for node %s: %v", hb.NodeID, err)
+			if uid > 0 && !pStore.CanAddProbe(uid, probeURLs(hb.Probes)) {
+				log.Printf("probe quota exceeded for user %d on node %s", uid, hb.NodeID)
+				// Drop the offending batch but keep the heartbeat ack
+				// green — the operator can fix the agent config and the
+				// next heartbeat will resume collection.
+				hb.Probes = nil
+			}
+			if len(hb.Probes) > 0 {
+				if err := pStore.RecordProbeResults(hb.NodeID, hb.Probes); err != nil {
+					log.Printf("probe persist failed for node %s: %v", hb.NodeID, err)
+				}
 			}
 		}
 
@@ -1053,4 +1061,20 @@ echo "==> [NodePulse] Agent installed and registered successfully as ${NODE_ID}!
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
+}
+
+// probeURLs extracts the URL field from a batch of probe results, deduped.
+// Used by the ingest handler to count distinct NEW URLs against the
+// per-user probe quota. Returned slice order is unspecified.
+func probeURLs(results []protocol.ProbeResult) []string {
+	seen := make(map[string]struct{}, len(results))
+	out := make([]string, 0, len(results))
+	for _, r := range results {
+		if _, ok := seen[r.URL]; ok {
+			continue
+		}
+		seen[r.URL] = struct{}{}
+		out = append(out, r.URL)
+	}
+	return out
 }
