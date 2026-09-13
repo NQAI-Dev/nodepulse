@@ -339,14 +339,15 @@ func TestMergeProbeResultsAll(t *testing.T) {
 	httpR := []protocol.ProbeResult{{URL: "h", Kind: protocol.ProbeKindHTTP}}
 	tcpR := []protocol.ProbeResult{{URL: "t", Kind: protocol.ProbeKindTCP}}
 	tlsR := []protocol.ProbeResult{{URL: "s", Kind: protocol.ProbeKindTLS}}
-	out := MergeProbeResultsAll(httpR, tcpR, tlsR)
-	if len(out) != 3 {
-		t.Fatalf("len = %d, want 3", len(out))
+	dnsR := []protocol.ProbeResult{{URL: "d", Kind: protocol.ProbeKindDNS}}
+	out := MergeProbeResultsAll(httpR, tcpR, tlsR, dnsR)
+	if len(out) != 4 {
+		t.Fatalf("len = %d, want 4", len(out))
 	}
-	if out[0].Kind != protocol.ProbeKindHTTP || out[1].Kind != protocol.ProbeKindTCP || out[2].Kind != protocol.ProbeKindTLS {
+	if out[0].Kind != protocol.ProbeKindHTTP || out[1].Kind != protocol.ProbeKindTCP || out[2].Kind != protocol.ProbeKindTLS || out[3].Kind != protocol.ProbeKindDNS {
 		t.Errorf("order broken: %+v", out)
 	}
-	if MergeProbeResultsAll(nil, nil, nil) != nil {
+	if MergeProbeResultsAll(nil, nil, nil, nil) != nil {
 		t.Errorf("all-empty should return nil")
 	}
 }

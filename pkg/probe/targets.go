@@ -159,20 +159,96 @@ func MergeProbeResults(httpResults, tcpResults []protocol.ProbeResult) []protoco
 	return out
 }
 
-// MergeProbeResultsAll concatenates HTTP, TCP, and TLS probe slices
+// MergeProbeResultsAll concatenates HTTP, TCP, TLS, and DNS probe slices
 // while preserving each result's Kind tag. Order is HTTP first, then
-// TCP, then TLS, so the public status page renders them in the natural
-// "synthetic, then external-dependency, then certificate health"
-// reading order.
+// TCP, then TLS, then DNS, so the public status page renders them in
+// the natural "synthetic, then external-dependency, then certificate
+// health, then resolver sanity" reading order.
 //
 // If all sides are empty the function is allocation-free.
-func MergeProbeResultsAll(httpResults, tcpResults, tlsResults []protocol.ProbeResult) []protocol.ProbeResult {
-	if len(httpResults) == 0 && len(tcpResults) == 0 && len(tlsResults) == 0 {
+func MergeProbeResultsAll(httpResults, tcpResults, tlsResults, dnsResults []protocol.ProbeResult) []protocol.ProbeResult {
+	if len(httpResults) == 0 && len(tcpResults) == 0 && len(tlsResults) == 0 && len(dnsResults) == 0 {
 		return nil
 	}
-	out := make([]protocol.ProbeResult, 0, len(httpResults)+len(tcpResults)+len(tlsResults))
+	out := make([]protocol.ProbeResult, 0, len(httpResults)+len(tcpResults)+len(tlsResults)+len(dnsResults))
 	out = append(out, httpResults...)
 	out = append(out, tcpResults...)
 	out = append(out, tlsResults...)
+	out = append(out, dnsResults...)
 	return out
+}
+
+// ParseDNSTargets parses the operator-facing `-probe-dns` flag value
+// into a normalized DNSTarget slice. The accepted shapes are:
+//
+//   - "host" — A record lookup, any result is OK
+//   - "host=substring" — A record lookup, result must contain substring
+//   - "host=TYPE" — record-type lookup (TYPE = A or AAAA)
+//   - "host=TYPE=substring" — record-type lookup with substring assertion
+//
+// Only "=" is a separator (":") is reserved because IPv6 literals use
+// it. Empty entries are dropped. Leading/trailing whitespace is trimmed.
+//
+// ponytail: same delimiter philosophy as ParseTCPTargets / ParseTLSTargets.
+// If operators ask for a richer config (resolver pinning, retry budget),
+// promote this to a JSON list rather than overload the flag.
+func ParseDNSTargets(raw string) ([]DNSTarget, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]DNSTarget, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		addr, rest, _ := strings.Cut(p, "=")
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			return nil, fmt.Errorf("dns probe target %q: empty address", p)
+		}
+		t := DNSTarget{Address: addr}
+		if rest == "" {
+			t.Type = "A"
+			out = append(out, t)
+			continue
+		}
+		// Rest is either "substring", "TYPE", or "TYPE=substring".
+		recordType, expected, hasType := strings.Cut(rest, "=")
+		recordType = strings.TrimSpace(recordType)
+		expected = strings.TrimSpace(expected)
+		if hasType {
+			t.Type = recordType
+			t.Expected = expected
+		} else if isRecordType(recordType) {
+			t.Type = recordType
+			// rest was bare record type, no expected substring
+		} else {
+			t.Expected = recordType
+		}
+		if strings.TrimSpace(t.Type) == "" {
+			t.Type = "A"
+		} else {
+			t.Type = strings.ToUpper(strings.TrimSpace(t.Type))
+		}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// isRecordType reports whether the string is one of the supported DNS
+// record types for probes. We deliberately keep the list tiny: A and
+// AAAA cover the operator use cases (split-horizon debugging, IPv6
+// rollout); CNAME / TXT / MX probes belong to a real DNS tool.
+func isRecordType(s string) bool {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "A", "AAAA":
+		return true
+	default:
+		return false
+	}
 }

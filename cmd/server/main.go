@@ -473,7 +473,7 @@ func main() {
 				windowSecs = n
 			}
 		}
-		// Optional kind filter (http|tcp). Unknown values yield an empty
+		// Optional kind filter (http|tcp|tls|dns). Unknown values yield an empty
 		// list rather than 400 — the public page should never break on
 		// a typo in an upstream URL parameter.
 		kind := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("kind")))

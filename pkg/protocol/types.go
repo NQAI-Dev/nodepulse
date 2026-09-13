@@ -138,4 +138,9 @@ const (
 	// and raises an incident when the cert enters the operator's
 	// configured warn window.
 	ProbeKindTLS = "tls"
+	// ProbeKindDNS resolves a hostname against the system resolver and
+	// (optionally) asserts a substring match on the result. It catches
+	// split-horizon DNS misconfigurations and stale resolver caches
+	// that a TCP probe alone would miss.
+	ProbeKindDNS = "dns"
 )
