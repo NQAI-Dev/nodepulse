@@ -293,7 +293,7 @@ func main() {
 		}
 
 		uid, _, err := pStore.GetUserByToken(token)
-		if err != nil && token != "np_live_master_secret" {
+		if err != nil && !pStore.IsMasterToken(token) {
 			http.Error(w, `{"error":"unauthorized node token"}`, http.StatusUnauthorized)
 			return
 		}
@@ -350,7 +350,7 @@ func main() {
 			token = r.URL.Query().Get("token")
 		}
 		uid, _, err := pStore.GetUserByToken(token)
-		if err != nil && token != "np_live_master_secret" {
+		if err != nil && !pStore.IsMasterToken(token) {
 			http.Error(w, `{"error":"unauthorized node token"}`, http.StatusUnauthorized)
 			return
 		}

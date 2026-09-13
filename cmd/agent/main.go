@@ -40,7 +40,7 @@ func main() {
 	if *token == "" {
 		*token = os.Getenv("NODEPULSE_TOKEN")
 		if *token == "" {
-			*token = "np_live_master_secret"
+			log.Fatalf("no API token provided — pass -token=<your-api-token> or set NODEPULSE_TOKEN (get one by logging in at https://pulse.nqai.es-cloud.ru/)")
 		}
 	}
 

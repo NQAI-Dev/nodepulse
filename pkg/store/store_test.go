@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"os"
 	"testing"
 	"time"
@@ -17,8 +18,30 @@ func TestPersistentStore(t *testing.T) {
 		t.Fatalf("Failed to create store: %v", err)
 	}
 
-	if !s.ValidateToken("np_live_master_secret") {
-		t.Fatalf("Default token must be valid")
+	// Master admin token is randomly generated on first startup (see
+	// ensureMasterToken in pkg/store/sqlite.go). Read it via a separate
+	// connection because the store doesn't expose the cached value
+	// through its public API — production code must use IsMasterToken or
+	// ValidateToken, never read the literal directly.
+	rawDB, err := sql.Open("sqlite", dbFile)
+	if err != nil {
+		t.Fatalf("open raw DB: %v", err)
+	}
+	defer rawDB.Close()
+	var masterTok string
+	if err := rawDB.QueryRow("SELECT token FROM api_tokens WHERE name = 'master'").Scan(&masterTok); err != nil {
+		t.Fatalf("read master token: %v", err)
+	}
+	if masterTok == "" || masterTok == "np_live_master_secret" {
+		t.Fatalf("master token must be a fresh random value, got %q", masterTok)
+	}
+	if !s.ValidateToken(masterTok) {
+		t.Fatalf("Stored master token must validate")
+	}
+	// Regression guard: the legacy literal must NOT validate after the
+	// master-token-rotation fix lands.
+	if s.ValidateToken("np_live_master_secret") {
+		t.Fatalf("Legacy literal must NOT validate after rotation")
 	}
 
 	hb := &protocol.Heartbeat{
