@@ -39,7 +39,7 @@ func TestMarkInvoicePaid_Idempotency(t *testing.T) {
 		t.Fatalf("save invoice: %v", err)
 	}
 
-	if _, err := s.MarkInvoicePaid("inv-1"); err != nil {
+	if _, _, err := s.MarkInvoicePaid("inv-1"); err != nil {
 		t.Fatalf("first MarkInvoicePaid: %v", err)
 	}
 
@@ -55,7 +55,7 @@ func TestMarkInvoicePaid_Idempotency(t *testing.T) {
 	// re-fire the webhook. A correct implementation is a no-op.
 	waitOneSecForTimestampMove(t)
 
-	if _, err := s.MarkInvoicePaid("inv-1"); err != nil {
+	if _, _, err := s.MarkInvoicePaid("inv-1"); err != nil {
 		t.Fatalf("second MarkInvoicePaid: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestMarkInvoicePaid_StampsPaidAtOnlyOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := s.MarkInvoicePaid("inv-2"); err != nil {
+	if _, _, err := s.MarkInvoicePaid("inv-2"); err != nil {
 		t.Fatal(err)
 	}
 	var firstPaidAt string
@@ -102,7 +102,7 @@ func TestMarkInvoicePaid_StampsPaidAtOnlyOnce(t *testing.T) {
 	// should not move.
 	waitOneSecForTimestampMove(t)
 
-	if _, err := s.MarkInvoicePaid("inv-2"); err != nil {
+	if _, _, err := s.MarkInvoicePaid("inv-2"); err != nil {
 		t.Fatal(err)
 	}
 	var secondPaidAt string
@@ -149,7 +149,7 @@ func TestMarkInvoicePaid_SecondInvoiceExtendsNotResets(t *testing.T) {
 
 	// New invoice payment: must EXTEND from existing 2099-01-01, not
 	// reset to now+30d (~2026-10-13).
-	if _, err := s.MarkInvoicePaid("inv-B"); err != nil {
+	if _, _, err := s.MarkInvoicePaid("inv-B"); err != nil {
 		t.Fatalf("MarkInvoicePaid inv-B: %v", err)
 	}
 	var newUntil string

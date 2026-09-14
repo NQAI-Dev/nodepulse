@@ -46,16 +46,24 @@ func handleBillingWebhook(w http.ResponseWriter, r *http.Request, pStore *store.
 
 	if hook.Payload.Status == "paid" {
 		invID := fmt.Sprintf("%d", hook.Payload.InvoiceID)
-		uid, err := pStore.MarkInvoicePaid(invID)
-		if err != nil {
+		uid, firstCharge, err := pStore.MarkInvoicePaid(invID)
+		switch {
+		case err != nil:
 			// MarkInvoicePaid returned error: surface as 500 so the
 			// payment provider retries. We log with both the invoice
 			// id (for grep) and the wrapped error (operator action).
 			log.Printf("[billing] mark paid invoice %s failed: %v", invID, err)
 			http.Error(w, `{"error":"internal error — retrying"}`, http.StatusInternalServerError)
 			return
+		case firstCharge:
+			log.Printf("[billing] invoice %s paid, uid=%d upgraded to PRO", invID, uid)
+		default:
+			// Idempotent webhook retry — MarkInvoicePaid early-returned
+			// without writing because paid_at was already stamped. Log
+			// differently so a flaky network doesn't produce two
+			// "upgraded" lines per real payment.
+			log.Printf("[billing] invoice %s webhook retry, uid=%d already PRO (no-op)", invID, uid)
 		}
-		log.Printf("[billing] invoice %s paid, uid=%d upgraded to PRO", invID, uid)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

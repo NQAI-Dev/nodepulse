@@ -55,7 +55,7 @@ func (p *PersistentStore) SaveInvoice(invoiceID string, userID int64, plan, amou
 //     datetime('now', '+30 days')) — extension from existing value if the
 //     user already has paid time remaining, otherwise the standard
 //     30-day window from "now". This is atomic in a single UPDATE.
-func (p *PersistentStore) MarkInvoicePaid(invoiceID string) (int64, error) {
+func (p *PersistentStore) MarkInvoicePaid(invoiceID string) (int64, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -63,19 +63,20 @@ func (p *PersistentStore) MarkInvoicePaid(invoiceID string) (int64, error) {
 	var paidAt sql.NullString
 	err := p.db.QueryRow("SELECT user_id, paid_at FROM invoices WHERE invoice_id = ?", invoiceID).Scan(&userID, &paidAt)
 	if err != nil {
-		return 0, fmt.Errorf("lookup invoice %q: %w", invoiceID, err)
+		return 0, false, fmt.Errorf("lookup invoice %q: %w", invoiceID, err)
 	}
 
 	// Idempotent fast path: if the invoice is already stamped paid, the
-	// webhook is a retry — return the user id with no further writes.
-	// pro_until and paid_at stay at their original values, so a transient
-	// network blip can't move the user's paid window.
+	// webhook is a retry — return the user id with no further writes and
+	// the boolean reports that nothing was changed. The caller uses that
+	// flag to log "webhook retry, no-op" instead of "upgraded user N" so
+	// a flaky network doesn't produce two "upgraded" lines per real payment.
 	if paidAt.Valid {
-		return userID, nil
+		return userID, false, nil
 	}
 
 	if _, err := p.db.Exec("UPDATE invoices SET status = 'paid', paid_at = CURRENT_TIMESTAMP WHERE invoice_id = ?", invoiceID); err != nil {
-		return 0, fmt.Errorf("stamp paid_at for invoice %q (uid=%d): %w", invoiceID, userID, err)
+		return 0, false, fmt.Errorf("stamp paid_at for invoice %q (uid=%d): %w", invoiceID, userID, err)
 	}
 	// Extend (or initial-set) pro_until in a single atomic UPDATE:
 	//   - if pro_until is already set: add 30 days from it (stack / renew)
@@ -84,9 +85,9 @@ func (p *PersistentStore) MarkInvoicePaid(invoiceID string) (int64, error) {
 		SET plan = 'pro',
 		    pro_until = COALESCE(datetime(pro_until, '+30 days'), datetime('now', '+30 days'))
 		WHERE id = ?`, userID); err != nil {
-		return 0, fmt.Errorf("extend pro_until for uid=%d on invoice %q: %w", userID, invoiceID, err)
+		return 0, false, fmt.Errorf("extend pro_until for uid=%d on invoice %q: %w", userID, invoiceID, err)
 	}
-	return userID, nil
+	return userID, true, nil
 }
 
 func (p *PersistentStore) GetUserPlan(userID int64) (string, error) {
