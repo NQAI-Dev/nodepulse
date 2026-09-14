@@ -82,45 +82,6 @@ func TestMarkInvoicePaid_Idempotency(t *testing.T) {
 // same idempotency surface: the audit row in invoices should be stamped at
 // the first successful webhook, not overwritten on retries.
 
-// TestMarkInvoicePaid_FirstChargeBool pins the new (int64, bool, error)
-// contract from d444869: first=true on initial charge, first=false on
-// idempotent retry. The webhook handler in
-// cmd/server/billing_webhook_handlers.go switches on this bool to
-// distinguish the "upgraded to PRO" log line from the "webhook retry,
-// already PRO" one. Without this pin a future refactor could silently
-// regress to "upgraded user N" twice per real payment.
-func TestMarkInvoicePaid_FirstChargeBool(t *testing.T) {
-	s := newBillingStore(t)
-	uid, _, err := s.Register("first-charge-user", "secret123")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SaveInvoice("inv-3", uid, "pro", "5.00", ""); err != nil {
-		t.Fatalf("save invoice: %v", err)
-	}
-
-	// Initial call — firstCharge must be true. Webhook handler reads this
-	// to emit "upgraded to PRO" instead of "webhook retry".
-	_, first1, err := s.MarkInvoicePaid("inv-3")
-	if err != nil {
-		t.Fatalf("first MarkInvoicePaid: %v", err)
-	}
-	if !first1 {
-		t.Errorf("first MarkInvoicePaid: firstCharge=false; want true (initial charge)")
-	}
-
-	// Retry — firstCharge must be false. paid_at already stamped per
-	// 8af1a60 idempotency, so MarkInvoicePaid returns early. Webhook
-	// handler logs "retry, no-op" in this branch.
-	_, first2, err := s.MarkInvoicePaid("inv-3")
-	if err != nil {
-		t.Fatalf("retry MarkInvoicePaid: %v", err)
-	}
-	if first2 {
-		t.Errorf("retry MarkInvoicePaid: firstCharge=true; want false (paid_at already stamped, idempotent path)")
-	}
-}
-
 func TestMarkInvoicePaid_StampsPaidAtOnlyOnce(t *testing.T) {
 	s := newBillingStore(t)
 	uid, _, _ := s.Register("billing-stamp-user", "secret123")
@@ -210,5 +171,67 @@ func TestMarkInvoicePaid_SecondInvoiceExtendsNotResets(t *testing.T) {
 	s.db.QueryRow("SELECT COUNT(*) FROM invoices WHERE invoice_id = ? AND paid_at IS NOT NULL", "inv-B").Scan(&paidCount)
 	if paidCount != 1 {
 		t.Fatalf("expected inv-B paid exactly once; got %d", paidCount)
+	}
+}
+
+// TestMarkInvoicePaid_FirstChargeBool pins the (uid, firstCharge, error)
+// return contract shipped in d444869: firstCharge=true on the initial
+// transition of an invoice from "created" to "paid", firstCharge=false
+// on any subsequent call for the same invoice (idempotent webhook retry),
+// and firstCharge=true again on a *different* invoice for the same user
+// (separate first charge).
+//
+// This locks the bool boundary. The existing tests discard `first` and
+// rely on paid_at + pro_until equality to detect regressions; that's
+// the timestamp layer of idempotency. This test is the explicit-boolean
+// layer — a future refactor that accidentally makes the idempotent path
+// report first=true (which would re-stamp paid_at and re-extend pro_until
+// on every retry) trips here without depending on timestamp tricks.
+func TestMarkInvoicePaid_FirstChargeBool(t *testing.T) {
+	s := newBillingStore(t)
+	uid, _, _ := s.Register("billing-firstcharge-user", "secret123")
+
+	if err := s.SaveInvoice("inv-fc-1", uid, "pro", "5.00", ""); err != nil {
+		t.Fatalf("save inv-fc-1: %v", err)
+	}
+
+	// Case 1: fresh invoice → firstCharge=true.
+	_, first, err := s.MarkInvoicePaid("inv-fc-1")
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if !first {
+		t.Errorf("first call: firstCharge=false, want true (fresh invoice must report first=true)")
+	}
+
+	// Case 2: retry same invoice → firstCharge=false.
+	_, first, err = s.MarkInvoicePaid("inv-fc-1")
+	if err != nil {
+		t.Fatalf("retry call: %v", err)
+	}
+	if first {
+		t.Errorf("retry call: firstCharge=true, want false (idempotent retry must NOT report first=true)")
+	}
+
+	// Case 3: another retry on same invoice → still false.
+	_, first, err = s.MarkInvoicePaid("inv-fc-1")
+	if err != nil {
+		t.Fatalf("third call: %v", err)
+	}
+	if first {
+		t.Errorf("third call: firstCharge=true, want false")
+	}
+
+	// Case 4: a different invoice for the same user → firstCharge=true
+	// (a separate first charge, not a retry).
+	if err := s.SaveInvoice("inv-fc-2", uid, "pro", "5.00", ""); err != nil {
+		t.Fatalf("save inv-fc-2: %v", err)
+	}
+	_, first, err = s.MarkInvoicePaid("inv-fc-2")
+	if err != nil {
+		t.Fatalf("new-invoice call: %v", err)
+	}
+	if !first {
+		t.Errorf("new invoice: firstCharge=false, want true (separate invoice is a fresh first charge)")
 	}
 }
