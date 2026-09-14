@@ -24,3 +24,15 @@ updates:
       prefix: "ci"
     labels:
       - "ci"
+    ignore:
+      # Deliberate runner-compat caps. ci.yml was downgraded in 927e20f
+      # (Sep 13 2026) because v7+ of these actions broke on the runner.
+      # Newer bump PRs from Dependabot would re-introduce the bug.
+      - dependency-name: "actions/checkout"
+        versions: ["7.x", "8.x", "9.x", "10.x"]
+      - dependency-name: "actions/setup-go"
+        versions: ["7.x", "8.x", "9.x", "10.x"]
+      - dependency-name: "actions/upload-artifact"
+        versions: ["7.x", "8.x", "9.x", "10.x"]
+      - dependency-name: "golangci/golangci-lint-action"
+        versions: ["7.x", "8.x", "9.x", "10.x"]
