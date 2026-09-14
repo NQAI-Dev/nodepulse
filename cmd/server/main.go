@@ -189,25 +189,12 @@ func main() {
 		handleBillingCreateInvoice(w, r, pStore, cryptoClient.CreateInvoice)
 	})
 
+	// Handler body lives in billing_webhook_handlers.go so the
+	// silent-payment-loss contract (MarkInvoicePaid error → 500 so
+	// CryptoBot retries) can be unit-tested without standing up a real
+	// payment provider.
 	mux.HandleFunc("POST /api/v1/billing/webhook", func(w http.ResponseWriter, r *http.Request) {
-		var hook protocol.CryptoBotWebhook
-		if err := json.NewDecoder(r.Body).Decode(&hook); err != nil {
-			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
-			return
-		}
-
-		if hook.Payload.Status == "paid" {
-			invID := fmt.Sprintf("%d", hook.Payload.InvoiceID)
-			uid, err := pStore.MarkInvoicePaid(invID)
-			if err != nil {
-				log.Printf("Error marking invoice %s paid: %v", invID, err)
-			} else {
-				log.Printf("Invoice %s successfully paid! Upgraded user %d to PRO", invID, uid)
-			}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"ok":true}`))
+		handleBillingWebhook(w, r, pStore)
 	})
 
 	mux.HandleFunc("GET /api/v1/billing/plan", func(w http.ResponseWriter, r *http.Request) {
