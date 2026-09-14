@@ -81,6 +81,46 @@ func TestMarkInvoicePaid_Idempotency(t *testing.T) {
 // TestMarkInvoicePaid_StampsPaidAtOnlyOnce covers the related half of the
 // same idempotency surface: the audit row in invoices should be stamped at
 // the first successful webhook, not overwritten on retries.
+
+// TestMarkInvoicePaid_FirstChargeBool pins the new (int64, bool, error)
+// contract from d444869: first=true on initial charge, first=false on
+// idempotent retry. The webhook handler in
+// cmd/server/billing_webhook_handlers.go switches on this bool to
+// distinguish the "upgraded to PRO" log line from the "webhook retry,
+// already PRO" one. Without this pin a future refactor could silently
+// regress to "upgraded user N" twice per real payment.
+func TestMarkInvoicePaid_FirstChargeBool(t *testing.T) {
+	s := newBillingStore(t)
+	uid, _, err := s.Register("first-charge-user", "secret123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveInvoice("inv-3", uid, "pro", "5.00", ""); err != nil {
+		t.Fatalf("save invoice: %v", err)
+	}
+
+	// Initial call — firstCharge must be true. Webhook handler reads this
+	// to emit "upgraded to PRO" instead of "webhook retry".
+	_, first1, err := s.MarkInvoicePaid("inv-3")
+	if err != nil {
+		t.Fatalf("first MarkInvoicePaid: %v", err)
+	}
+	if !first1 {
+		t.Errorf("first MarkInvoicePaid: firstCharge=false; want true (initial charge)")
+	}
+
+	// Retry — firstCharge must be false. paid_at already stamped per
+	// 8af1a60 idempotency, so MarkInvoicePaid returns early. Webhook
+	// handler logs "retry, no-op" in this branch.
+	_, first2, err := s.MarkInvoicePaid("inv-3")
+	if err != nil {
+		t.Fatalf("retry MarkInvoicePaid: %v", err)
+	}
+	if first2 {
+		t.Errorf("retry MarkInvoicePaid: firstCharge=true; want false (paid_at already stamped, idempotent path)")
+	}
+}
+
 func TestMarkInvoicePaid_StampsPaidAtOnlyOnce(t *testing.T) {
 	s := newBillingStore(t)
 	uid, _, _ := s.Register("billing-stamp-user", "secret123")
