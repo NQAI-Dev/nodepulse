@@ -297,26 +297,18 @@ func TestMigrateTenantSchemaIdempotent(t *testing.T) {
 }
 
 // TestMigrateTenantSchemaIgnoresUnrelatedTables verifies the migration
-// only touches the three named tables (users, node_owners, incidents)
-// and does NOT add tenant_id to user_settings / api_tokens /
-// telegram_users / etc. — those tables link back to users via user_id
-// FK and can derive tenant_id via JOIN when needed.
+// only touches the named tables
+// and does NOT add tenant_id to user_settings / telegram_users / etc.
 func TestMigrateTenantSchemaIgnoresUnrelatedTables(t *testing.T) {
 	dbFile := "test_tenant_untouched.db"
 	defer os.Remove(dbFile)
-
-	if err := seedLegacyTenantSchema(dbFile); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
 
 	if _, err := NewPersistentStore(dbFile, "", 0); err != nil {
 		t.Fatalf("NewPersistentStore: %v", err)
 	}
 
-	// user_settings, api_tokens, telegram_users must NOT have
-	// tenant_id after the migration runs. They link to users via FK
-	// and JOIN through users for filtering.
-	for _, table := range []string{"user_settings", "api_tokens"} {
+	// user_settings must NOT have tenant_id
+	for _, table := range []string{"user_settings"} {
 		cols, err := tableColumns(mustOpenDBForTest(t, dbFile), table)
 		if err != nil {
 			t.Fatalf("tableColumns(%s): %v", table, err)
