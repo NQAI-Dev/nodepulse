@@ -10,3 +10,6 @@ bin/
 # Keep `bin/` for intentional builds, but don't let bare `go build` pollute root.
 /server
 /agent
+
+# Local tooling metadata
+.serena/
