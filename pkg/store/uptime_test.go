@@ -94,7 +94,7 @@ func TestAllNodesUptimeListsEachNode(t *testing.T) {
 		t.Fatalf("failed to create store: %v", err)
 	}
 
-	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	for _, id := range []string{"alpha", "beta", "gamma"} {
 		st.RecordHeartbeat(id, now)
 		st.RecordHeartbeat(id, now.Add(7*time.Second))
