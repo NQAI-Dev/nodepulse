@@ -77,6 +77,50 @@ func TestHeartbeatSerialization(t *testing.T) {
 	}
 }
 
+func TestHeartbeatSerializationUsesWireFieldNames(t *testing.T) {
+	hb := Heartbeat{
+		NodeID:    "node-1",
+		Timestamp: 1726950000,
+		CPU: CPUStats{
+			UsagePercent: 12.5,
+		},
+		Memory: MemoryStats{
+			UsedPercent: 25,
+		},
+		Disks: []DiskStats{{MountPoint: "/", UsedPercent: 50}},
+	}
+
+	data, err := json.Marshal(hb)
+	if err != nil {
+		t.Fatalf("failed to marshal Heartbeat: %v", err)
+	}
+
+	var wire struct {
+		NodeID string `json:"node_id"`
+		CPU    struct {
+			UsagePercent float64 `json:"usage_pct"`
+		} `json:"cpu"`
+		Memory struct {
+			UsedPercent float64 `json:"used_pct"`
+		} `json:"memory"`
+		Disks []struct {
+			MountPoint  string  `json:"mount"`
+			UsedPercent float64 `json:"used_pct"`
+		} `json:"disks"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatalf("failed to decode wire payload: %v", err)
+	}
+
+	if wire.NodeID != hb.NodeID || wire.CPU.UsagePercent != hb.CPU.UsagePercent ||
+		wire.Memory.UsedPercent != hb.Memory.UsedPercent {
+		t.Fatalf("wire field names did not preserve values: %s", data)
+	}
+	if len(wire.Disks) != 1 || wire.Disks[0].MountPoint != "/" || wire.Disks[0].UsedPercent != 50 {
+		t.Fatalf("wire disk fields did not preserve values: %s", data)
+	}
+}
+
 func TestIncidentSerialization(t *testing.T) {
 	inc := Incident{
 		ID:        "inc-1",
