@@ -13,6 +13,7 @@ func TestParseTags(t *testing.T) {
 		{"simple-csv", "env=prod,region=eu,role=db", []string{"env=prod", "region=eu", "role=db"}},
 		{"whitespace-separated", "env=prod region=eu role=db", []string{"env=prod", "region=eu", "role=db"}},
 		{"mixed-separators", "env=prod\nregion=eu, role=db", []string{"env=prod", "region=eu", "role=db"}},
+		{"tabs-and-crlf", "env=prod\tregion=eu\r\nrole=db", []string{"env=prod", "region=eu", "role=db"}},
 		{"dedup-preserve-order", "env=prod,env=staging,env=prod", []string{"env=prod", "env=staging"}},
 		{"trailing-commas", "env=prod,,,", []string{"env=prod"}},
 		{"plain-labels", "edge,canary", []string{"edge", "canary"}},

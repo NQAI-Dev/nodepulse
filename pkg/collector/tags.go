@@ -3,6 +3,7 @@ package collector
 import (
 	"os"
 	"strings"
+	"unicode"
 )
 
 // ParseTags accepts either a `NODEPULSE_TAGS` env value or a CLI flag value
@@ -18,9 +19,9 @@ func ParseTags(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
-	raw = strings.ReplaceAll(raw, "\n", ",")
-	raw = strings.ReplaceAll(raw, " ", ",")
-	parts := strings.Split(raw, ",")
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
 	seen := make(map[string]struct{}, len(parts))
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
