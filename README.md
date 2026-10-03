@@ -57,6 +57,24 @@ docker compose up -d
 
 Сервер будет доступен на порту `8080`.
 
+### Синтетические проверки агента
+
+Агент может проверять HTTP(S), TCP-порты, TLS-сертификаты, DNS-ответы и ICMP-доступность на каждом heartbeat. Передайте нужные цели соответствующими флагами, например:
+
+```bash
+nodepulse-agent \
+  -node my-host \
+  -server https://your-control-plane.example/api/v1/ingest \
+  -token YOUR_API_TOKEN \
+  -probe-urls https://api.example.com/health \
+  -probe-tcp db.example.com:5432,redis.example.com:6379 \
+  -probe-tls api.example.com:443=30d:1.3 \
+  -probe-dns internal.example.com=10.0. \
+  -probe-icmp 1.1.1.1=4
+```
+
+Списки целей разделяются запятыми. Для TCP можно указать `host:port=строка` — агент проверит, что первая строка баннера содержит этот текст. TLS-проверка по умолчанию валидирует сертификат и использует окно предупреждения 14 дней; в примере задано 30 дней и минимум TLS 1.3. ICMP требует `CAP_NET_RAW` либо разрешённого для пользователя диапазона `net.ipv4.ping_group_range`.
+
 ---
 
 ## 🔐 Оператор: онбординг пользователей через Telegram

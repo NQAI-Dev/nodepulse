@@ -66,6 +66,24 @@ nodepulse-agent \
 
 See `deploy/` for systemd unit templates and a sample nginx front.
 
+### Agent synthetic probes
+
+On every heartbeat the agent can probe HTTP(S), TCP ports, TLS certificates, DNS answers and ICMP reachability. Pass targets with the corresponding flags:
+
+```bash
+nodepulse-agent \
+  -node my-host \
+  -server https://your-control-plane.example/api/v1/ingest \
+  -token YOUR_API_TOKEN \
+  -probe-urls https://api.example.com/health \
+  -probe-tcp db.example.com:5432,redis.example.com:6379 \
+  -probe-tls api.example.com:443=30d:1.3 \
+  -probe-dns internal.example.com=10.0. \
+  -probe-icmp 1.1.1.1=4
+```
+
+Separate multiple targets with commas. For TCP, `host:port=text` also checks that the first banner line contains `text`. TLS probes validate certificates by default and warn 14 days before expiry; the example sets a 30-day window and requires TLS 1.3. ICMP requires `CAP_NET_RAW` or a permitted `net.ipv4.ping_group_range` for the agent user.
+
 ---
 
 ## 🧱 Tech stack
