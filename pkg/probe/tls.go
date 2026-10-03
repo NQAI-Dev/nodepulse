@@ -71,6 +71,7 @@ func NewTLSRunner(targets []TLSTarget, timeout time.Duration) *TLSRunner {
 		if addr == "" {
 			continue
 		}
+		raw.Address = addr
 		if i, ok := seen[addr]; ok {
 			clean[i] = raw
 			continue

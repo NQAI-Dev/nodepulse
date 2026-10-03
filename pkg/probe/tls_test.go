@@ -78,7 +78,7 @@ func newTLSServer(t *testing.T, notAfter time.Time) (addr string, stop func()) {
 func TestNewTLSRunnerDefaultsAndDedupes(t *testing.T) {
 	in := []TLSTarget{
 		{Address: "  a.example:443 "},
-		{Address: "a.example:443", WarnBefore: 7 * 24 * time.Hour},
+		{Address: " a.example:443 ", WarnBefore: 7 * 24 * time.Hour},
 		{Address: ""},
 		{Address: "b.example:8443", WarnBefore: 30 * 24 * time.Hour},
 	}
