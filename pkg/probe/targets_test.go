@@ -58,6 +58,12 @@ func TestParseTCPTargetsRejectsEmptyHost(t *testing.T) {
 	}
 }
 
+func TestParseTLSTargetsRejectsWarnWindowOverflow(t *testing.T) {
+	if _, err := ParseTLSTargets("example.com:443=9223372036854775807d"); err == nil {
+		t.Fatal("expected oversized warning window to be rejected")
+	}
+}
+
 func TestParseTCPTargetsDedupAndBannerMerge(t *testing.T) {
 	// NewTCPRunner does the dedup + banner-merge; this test pins the
 	// external behaviour that the agent relies on.

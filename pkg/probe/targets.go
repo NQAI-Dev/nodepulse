@@ -130,16 +130,21 @@ func parseWarnWindow(raw string) (time.Duration, error) {
 	if err != nil || n < 0 {
 		return 0, fmt.Errorf("warn window %q: must be a non-negative integer followed by d/h/m", raw)
 	}
+	var unit time.Duration
 	switch last {
 	case 'd':
-		return time.Duration(n) * 24 * time.Hour, nil
+		unit = 24 * time.Hour
 	case 'h':
-		return time.Duration(n) * time.Hour, nil
+		unit = time.Hour
 	case 'm':
-		return time.Duration(n) * time.Minute, nil
+		unit = time.Minute
 	default:
 		return 0, fmt.Errorf("warn window %q: suffix must be d, h, or m", raw)
 	}
+	if int64(n) > int64(^uint64(0)>>1)/int64(unit) {
+		return 0, fmt.Errorf("warn window %q: duration is too large", raw)
+	}
+	return time.Duration(n) * unit, nil
 }
 
 // MergeProbeResults concatenates HTTP and TCP probe slices while
@@ -261,9 +266,9 @@ func isRecordType(s string) bool {
 //   - "host"          — default 3 echo packets per probe
 //   - "host=N"        — send N echos per probe (N clamped to [1,10])
 //   - "host=N=1.2.3.4" — also pin the destination to a literal IPv4
-//                        (useful when DNS returns multiple A records
-//                        and the operator wants to probe a specific
-//                        one — e.g., the BGP-anycast IP)
+//     (useful when DNS returns multiple A records
+//     and the operator wants to probe a specific
+//     one — e.g., the BGP-anycast IP)
 //
 // "=" is reserved because IPv6 literals may contain it; for the same
 // reason ParseICMPTargets does not accept a colon-separated form.
