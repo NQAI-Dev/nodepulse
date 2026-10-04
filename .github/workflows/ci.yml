@@ -14,12 +14,12 @@ jobs:
       fail-fast: false
       matrix:
         go: ["1.25"]
-        os: [ubuntu-latest]
+        os: [ubuntu-24.04]
     steps:
       - uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
           cache: true
@@ -39,7 +39,7 @@ jobs:
         run: go test -coverprofile=coverage.out -covermode=atomic ./pkg/...
 
       - name: Upload coverage
-        if: matrix.go == '1.25' && matrix.os == 'ubuntu-latest'
+        if: matrix.go == '1.25' && matrix.os == 'ubuntu-24.04'
         uses: actions/upload-artifact@v7
         with:
           name: coverage
@@ -47,10 +47,10 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.25"
           cache: true
