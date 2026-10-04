@@ -116,6 +116,12 @@ func TestSnoozeSeconds(t *testing.T) {
 	}
 }
 
+func TestAllowedSnoozeKeysOrder(t *testing.T) {
+	if got := strings.Join(AllowedSnoozeKeys(), ","); got != "1h,4h,8h" {
+		t.Fatalf("snooze keys are not in canonical order: %q", got)
+	}
+}
+
 func TestSignCallbackData_Format(t *testing.T) {
 	const secret = "s"
 	const prefix = ActionAckPrefix

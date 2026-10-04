@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -201,6 +202,7 @@ func AllowedSnoozeKeys() []string {
 	for k := range allowedSnoozeSeconds {
 		out = append(out, k)
 	}
+	sort.Strings(out)
 	return out
 }
 
