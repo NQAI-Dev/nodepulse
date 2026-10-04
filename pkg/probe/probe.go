@@ -4,10 +4,10 @@
 // observations: it stores results, surfaces them on the public status page
 // and raises an incident when a probe flaps from OK to failing.
 //
-// Design constraints:
+// Design constraints for the HTTP Runner:
 //   - One Runner per agent; share via Run().
-//   - HTTP only. TCP / DNS / ICMP probes are out of scope for now; add
-//     tagged kinds once an operator actually asks for them.
+//   - This runner handles HTTP targets. TCP, TLS, DNS, and ICMP probes use
+//     their specialized runners in this package.
 //   - Bounded latency: every probe must complete within `Timeout`, even if
 //     the server hangs mid-response. Without that bound a slow upstream
 //     stalls the agent's heartbeat loop.
