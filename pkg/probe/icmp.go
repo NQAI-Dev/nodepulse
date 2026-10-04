@@ -71,11 +71,6 @@ func NewICMPRunner(targets []ICMPTarget, timeout time.Duration) *ICMPRunner {
 		if addr == "" {
 			continue
 		}
-		if i, ok := seen[addr]; ok {
-			clean[i] = raw
-			continue
-		}
-		seen[addr] = len(clean)
 		count := raw.Count
 		if count <= 0 {
 			count = 3
@@ -83,6 +78,11 @@ func NewICMPRunner(targets []ICMPTarget, timeout time.Duration) *ICMPRunner {
 		if count > 10 {
 			count = 10
 		}
+		if i, ok := seen[addr]; ok {
+			clean[i] = ICMPTarget{Address: addr, Count: count}
+			continue
+		}
+		seen[addr] = len(clean)
 		clean = append(clean, ICMPTarget{Address: addr, Count: count})
 	}
 	if timeout <= 0 {
@@ -350,7 +350,6 @@ func extractICMPPayload(buf []byte) []byte {
 	}
 	return buf
 }
-
 
 // classifyICMPDialErr maps the most common socket-open errors to
 // short, status-page-friendly strings. The two interesting ones are

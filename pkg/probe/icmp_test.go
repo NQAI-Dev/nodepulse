@@ -72,7 +72,7 @@ func TestNewICMPRunnerDedupDefaultsAndClamp(t *testing.T) {
 	r := NewICMPRunner([]ICMPTarget{
 		{Address: "  1.1.1.1  "},
 		{Address: ""},
-		{Address: "1.1.1.1", Count: 7},
+		{Address: "1.1.1.1", Count: 50},
 		{Address: "8.8.8.8"},
 		{Address: "9.9.9.9", Count: 50},
 	}, 0)
@@ -83,8 +83,8 @@ func TestNewICMPRunnerDedupDefaultsAndClamp(t *testing.T) {
 	if got[0].Address != "1.1.1.1" {
 		t.Errorf("trim: got %q", got[0].Address)
 	}
-	if got[0].Count != 7 {
-		t.Errorf("dedupe keeps last: Count=%d want 7", got[0].Count)
+	if got[0].Count != 10 {
+		t.Errorf("dedupe keeps last and clamps: Count=%d want 10", got[0].Count)
 	}
 	if got[2].Count != 10 {
 		t.Errorf("clamp to 10: Count=%d", got[2].Count)
@@ -195,7 +195,7 @@ var timeoutErr = timeoutErr_{}
 
 type timeoutErr_ struct{}
 
-func (timeoutErr_) Error() string  { return "i/o timeout" }
+func (timeoutErr_) Error() string { return "i/o timeout" }
 func (timeoutErr_) Timeout() bool { return true }
 
 func TestExtractICMPEchoReply(t *testing.T) {
@@ -221,4 +221,3 @@ func TestExtractICMPEchoReply(t *testing.T) {
 		t.Fatalf("extractICMPPayload(framed) failed: %v", pktFramed)
 	}
 }
-
