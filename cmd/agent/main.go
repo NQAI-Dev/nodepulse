@@ -36,6 +36,9 @@ func main() {
 	probeTimeout := flag.Duration("probe-timeout", 5*time.Second, "Per-probe wall-clock timeout")
 	probeFollowRedirect := flag.Bool("probe-follow-redirect", false, "Follow HTTP 3xx redirects during probes (off by default)")
 	flag.Parse()
+	if err := validateRuntimeDurations(*interval, *probeTimeout); err != nil {
+		log.Fatal(err)
+	}
 
 	if *token == "" {
 		*token = os.Getenv("NODEPULSE_TOKEN")
@@ -309,6 +312,16 @@ func main() {
 		flushLogs()
 		time.Sleep(*interval)
 	}
+}
+
+func validateRuntimeDurations(interval, probeTimeout time.Duration) error {
+	if interval <= 0 {
+		return errors.New("-interval must be greater than zero")
+	}
+	if probeTimeout <= 0 {
+		return errors.New("-probe-timeout must be greater than zero")
+	}
+	return nil
 }
 
 func boolToStatus(ok bool) string {
