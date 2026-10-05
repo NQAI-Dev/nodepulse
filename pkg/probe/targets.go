@@ -91,6 +91,9 @@ func ParseTLSTargets(raw string) ([]TLSTarget, error) {
 			continue
 		}
 		segments := strings.Split(rest, ":")
+		if len(segments) > 3 {
+			return nil, fmt.Errorf("tls probe target %q: too many segments after host:port", p)
+		}
 		warnRaw := strings.TrimSpace(segments[0])
 		if warnRaw != "" {
 			dur, err := parseWarnWindow(warnRaw)
@@ -101,12 +104,15 @@ func ParseTLSTargets(raw string) ([]TLSTarget, error) {
 		}
 		if len(segments) >= 2 {
 			t.MinTLS = strings.TrimSpace(segments[1])
+			if _, err := parseTLSVersion(t.MinTLS); err != nil {
+				return nil, fmt.Errorf("tls probe target %q: %w", p, err)
+			}
 		}
-		if len(segments) >= 3 && strings.EqualFold(strings.TrimSpace(segments[2]), "insecure") {
+		if len(segments) >= 3 {
+			if !strings.EqualFold(strings.TrimSpace(segments[2]), "insecure") {
+				return nil, fmt.Errorf("tls probe target %q: unknown option %q (want insecure)", p, segments[2])
+			}
 			t.InsecureSkipVerify = true
-		}
-		if len(segments) > 3 {
-			return nil, fmt.Errorf("tls probe target %q: too many segments after host:port", p)
 		}
 		out = append(out, t)
 	}

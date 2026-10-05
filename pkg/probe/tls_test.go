@@ -119,6 +119,8 @@ func TestParseTLSTargetsGrammar(t *testing.T) {
 		{"bad", nil, "empty host:port"},
 		{"a:1=5x", nil, "suffix must be d, h, or m"},
 		{"a:1=-1d", nil, "non-negative integer"},
+		{"a:1=5d:9.9", nil, "unknown tls version"},
+		{"a:1=5d:1.3:typo", nil, "unknown option"},
 		{"a:1=5d:1.3:extra:junk", nil, "too many segments"},
 	}
 	for _, tc := range cases {
@@ -309,9 +311,9 @@ func TestTLSProbeParallelOrder(t *testing.T) {
 	defer stop()
 
 	in := []TLSTarget{
-		{Address: "127.0.0.1:1", WarnBefore: 24 * time.Hour},                          // closed
-		{Address: srv, WarnBefore: 24 * time.Hour, InsecureSkipVerify: true},         // valid (short warn)
-		{Address: "no-such-host.invalid.:65535"},                                      // nx
+		{Address: "127.0.0.1:1", WarnBefore: 24 * time.Hour},                 // closed
+		{Address: srv, WarnBefore: 24 * time.Hour, InsecureSkipVerify: true}, // valid (short warn)
+		{Address: "no-such-host.invalid.:65535"},                             // nx
 	}
 	r := NewTLSRunner(in, 2*time.Second)
 	results := r.Run()
